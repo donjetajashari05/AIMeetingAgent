@@ -4,3 +4,4 @@ output/*
 !output/.gitkeep
 data/audio/*
 !data/audio/.gitkeep
+.env
