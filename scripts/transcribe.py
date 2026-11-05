@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import ctranslate2
@@ -20,7 +21,6 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 
 load_dotenv()
-sys.stdout.reconfigure(encoding="utf-8")  # so ë/ç print correctly in the Windows console
 
 SPEAKER_LABEL = "Folësi"
 
@@ -32,7 +32,83 @@ def get_device():
     return "cpu", "int8"
 
 
+@lru_cache(maxsize=2)
+def load_model(name):
+    """Load a Whisper model once and reuse it (loading takes several seconds)."""
+    device, compute_type = get_device()
+    return WhisperModel(name, device=device, compute_type=compute_type)
+
+
+def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
+                     num_speakers=None, min_speakers=None, max_speakers=None,
+                     on_segment=None, on_info=None, on_diarize=None, diarize_required=True):
+    """
+    Transcribe an audio file and return a dict with segments (and utterances
+    with speaker labels when diarize=True).
+
+    on_info(info) is called once the language/duration are known;
+    on_segment(segment_dict, info) is called for every transcribed segment;
+    on_diarize() is called when diarization starts.
+    With diarize_required=False a diarization failure is stored in
+    data["diarization_error"] instead of raising.
+    """
+    model = load_model(model_name)
+    start = time.time()
+    segments, info = model.transcribe(
+        str(audio),
+        language=language,
+        vad_filter=True,   # skips silence, which speeds things up and reduces errors
+        beam_size=5,
+        word_timestamps=diarize,  # word-level times are needed to match speakers
+    )
+    if on_info:
+        on_info(info)
+
+    results, words = [], []
+    for seg in segments:  # transcription actually happens while iterating
+        item = {"start": round(seg.start, 2), "end": round(seg.end, 2), "text": seg.text.strip()}
+        results.append(item)
+        for w in seg.words or []:
+            words.append({"start": w.start, "end": w.end, "word": w.word})
+        if on_segment:
+            on_segment(item, info)
+    asr_elapsed = time.time() - start
+
+    utterances, diarization_error = None, None
+    if diarize:
+        if on_diarize:
+            on_diarize()
+        try:
+            from diarize import assign_speakers, diarize as run_diarization
+
+            turns = run_diarization(str(audio), num_speakers=num_speakers,
+                                    min_speakers=min_speakers, max_speakers=max_speakers)
+            utterances = assign_speakers(words, turns, label=SPEAKER_LABEL)
+        except (Exception, SystemExit) as e:
+            if diarize_required:
+                raise
+            # Keep the transcript; just report why speakers are missing
+            diarization_error = str(e).splitlines()[0][:300]
+
+    data = {
+        "audio": str(audio),
+        "model": model_name,
+        "language": info.language,
+        "language_probability": round(info.language_probability, 3),
+        "duration_sec": round(info.duration, 1),
+        "processing_sec": round(time.time() - start, 1),
+        "asr_sec": round(asr_elapsed, 1),
+        "segments": results,
+    }
+    if utterances is not None:
+        data["utterances"] = utterances
+    if diarization_error:
+        data["diarization_error"] = diarization_error
+    return data
+
+
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # so ë/ç print correctly in the Windows console
     parser = argparse.ArgumentParser(description="Meeting transcription")
     parser.add_argument("audio", help="Path to the audio file (mp3, wav, m4a...)")
     parser.add_argument("--model", default="large-v3", help="tiny, base, small, medium, large-v3")
@@ -51,73 +127,44 @@ def main():
 
     device, compute_type = get_device()
     print(f"Device: {device} ({compute_type}) | Model: {args.model}")
-    model = WhisperModel(args.model, device=device, compute_type=compute_type)
 
-    start = time.time()
-    segments, info = model.transcribe(
-        args.audio,
-        language=args.language,
-        vad_filter=True,   # skips silence, which speeds things up and reduces errors
-        beam_size=5,
-        word_timestamps=args.diarize,  # word-level times are needed to match speakers
-    )
-    print(f"Language: {info.language} ({info.language_probability:.0%}) | "
-          f"Duration: {info.duration / 60:.1f} min\n")
+    def show_info(info):
+        print(f"Language: {info.language} ({info.language_probability:.0%}) | "
+              f"Duration: {info.duration / 60:.1f} min\n")
 
-    results, words = [], []
-    for seg in segments:  # transcription actually happens while iterating
-        text = seg.text.strip()
-        results.append({"start": round(seg.start, 2), "end": round(seg.end, 2), "text": text})
-        print(f"[{seg.start:7.1f}s -> {seg.end:7.1f}s] {text}")
-        for w in seg.words or []:
-            words.append({"start": w.start, "end": w.end, "word": w.word})
-    asr_elapsed = time.time() - start
+    def show_segment(s, _info):
+        print(f"[{s['start']:7.1f}s -> {s['end']:7.1f}s] {s['text']}")
 
-    utterances = None
     if args.diarize:
-        from diarize import assign_speakers, diarize
+        print("(Diarization runs after transcription.)")
+    data = transcribe_audio(args.audio, args.model, args.language, args.diarize,
+                            args.speakers, args.min_speakers, args.max_speakers,
+                            on_segment=show_segment, on_info=show_info)
 
-        print("\nDiarization (who is speaking)...")
-        d_start = time.time()
-        turns = diarize(args.audio, num_speakers=args.speakers,
-                        min_speakers=args.min_speakers, max_speakers=args.max_speakers)
-        utterances = assign_speakers(words, turns, label=SPEAKER_LABEL)
-        print(f"Found {len({u['speaker'] for u in utterances})} speakers "
-              f"in {time.time() - d_start:.0f} seconds\n")
-        for u in utterances:
+    if "utterances" in data:
+        print(f"\nFound {len({u['speaker'] for u in data['utterances']})} speakers\n")
+        for u in data["utterances"]:
             print(f"[{u['start']:7.1f}s] {u['speaker']}: {u['text']}")
 
-    elapsed = time.time() - start
+    elapsed = data["processing_sec"]
     print(f"\nFinished in {elapsed:.0f} seconds "
-          f"({info.duration / max(elapsed, 1):.1f}x faster than real time)")
+          f"({data['duration_sec'] / max(elapsed, 1):.1f}x faster than real time)")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     name = Path(args.audio).stem
-
-    data = {
-        "audio": args.audio,
-        "model": args.model,
-        "language": info.language,
-        "duration_sec": round(info.duration, 1),
-        "processing_sec": round(elapsed, 1),
-        "asr_sec": round(asr_elapsed, 1),
-        "segments": results,
-    }
-    if utterances is not None:
-        data["utterances"] = utterances
 
     with open(out_dir / f"{name}.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     # Plain text without speaker labels, used by evaluate_wer.py
     with open(out_dir / f"{name}.txt", "w", encoding="utf-8") as f:
-        f.write(" ".join(s["text"] for s in results))
+        f.write(" ".join(s["text"] for s in data["segments"]))
 
     saved = [f"{name}.json", f"{name}.txt"]
-    if utterances is not None:
+    if "utterances" in data:
         with open(out_dir / f"{name}_speakers.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(f"{u['speaker']}: {u['text']}" for u in utterances))
+            f.write("\n".join(f"{u['speaker']}: {u['text']}" for u in data["utterances"]))
         saved.append(f"{name}_speakers.txt")
 
     print(f"Results saved to {out_dir}: {', '.join(saved)}")

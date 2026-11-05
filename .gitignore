@@ -5,3 +5,5 @@ output/*
 data/audio/*
 !data/audio/.gitkeep
 .env
+data/app.db*
+data/uploads/

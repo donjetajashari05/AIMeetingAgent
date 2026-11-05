@@ -1,0 +1,16 @@
+{
+  "audio": "(shembull i shkruar me dorë)",
+  "language": "sq",
+  "segments": [],
+  "utterances": [
+    {"speaker": "Folësi 1", "start": 0.0, "end": 6.5, "text": "Mirëdita të gjithëve. Sot kemi dy tema: buxhetin për tremujorin e ardhshëm dhe faqen e re të internetit."},
+    {"speaker": "Folësi 1", "start": 7.0, "end": 13.0, "text": "Për buxhetin, propozimi është ta ulim shpenzimin për marketing me dhjetë përqind. A pajtohemi?"},
+    {"speaker": "Folësi 2", "start": 13.5, "end": 18.0, "text": "Po, pajtohem. Por duhet t'i kemi numrat e sakta nga shitjet para se ta finalizojmë."},
+    {"speaker": "Folësi 3", "start": 18.5, "end": 22.0, "text": "Edhe unë pajtohem. Atëherë e ulim me dhjetë përqind."},
+    {"speaker": "Folësi 1", "start": 22.5, "end": 27.0, "text": "Mirë, u vendos. Arta, a mund ta përgatitësh raportin final të buxhetit?"},
+    {"speaker": "Folësi 2", "start": 27.5, "end": 31.0, "text": "Po, unë e marr. Do ta kem gati deri të premten."},
+    {"speaker": "Folësi 1", "start": 31.5, "end": 37.0, "text": "Faleminderit. Tani faqja e internetit. Kush mund ta përditësojë faqen me çmimet e reja?"},
+    {"speaker": "Folësi 3", "start": 37.5, "end": 42.0, "text": "I'll take care of it. Mund ta bëj javën e ardhshme."},
+    {"speaker": "Folësi 1", "start": 42.5, "end": 48.0, "text": "Shkëlqyeshëm. Ende nuk e dimë a do ta ndërrojmë ofruesin e hostimit, këtë e diskutojmë herën tjetër."}
+  ]
+}
