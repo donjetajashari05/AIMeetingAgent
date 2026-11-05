@@ -1,0 +1,7 @@
+# Fjalori: fjalë që thuhen shpesh në mbledhje, që transkriptimi t'i shkruajë saktë.
+# Shto fjalë të ndara me presje, ose një për rresht. Rreshtat me # injorohen.
+# Mbaje të shkurtër (rreth 30-60 fjalë): modeli lexon vetëm pjesën e parë.
+
+qysh, qka, me bo, me punu, me shku, me kry, s'kom, s'kemi, a po, kqyre, najsen, tash, nesër, deri të premten
+task, deadline, sprint, review, deploy, release, bug, feature, meeting, call, update, backend, frontend
+Jira, LLM, API, transkript, agjent, Claude

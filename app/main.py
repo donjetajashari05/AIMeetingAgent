@@ -123,7 +123,7 @@ def status(user=User):
         "jira_url": os.environ.get("JIRA_BASE_URL", "").rstrip("/") if jira.configured() and not jira.mock() else None,
         "gpu": gpu,
         "models": MODELS,
-        "default_model": "large-v3" if gpu else "small",
+        "default_model": os.environ.get("WHISPER_MODEL") or "large-v3",  # most accurate for Albanian
         "today": date.today().isoformat(),
     }
 
@@ -141,7 +141,7 @@ async def create_meeting(
     title: str = Form(""),
     meeting_date: str = Form(""),
     language: str = Form(""),
-    model: str = Form("small"),
+    model: str = Form("large-v3"),
     source: str = Form("audio"),
     team_id: int | None = Form(None),
     project_id: int | None = Form(None),

@@ -67,6 +67,31 @@ def _process(meeting_id):
     _extract(meeting_id, data)
 
 
+GLOSSARY_FILE = db.ROOT / "data" / "fjalori.txt"
+
+
+def vocabulary_prompt(m):
+    """Hint for Whisper: the team's names, project names and the words in data/fjalori.txt.
+    Whisper reads only ~200 tokens of it, so it is kept short."""
+    words = []
+    if GLOSSARY_FILE.is_file():
+        for line in GLOSSARY_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                words += [w.strip() for w in line.split(",") if w.strip()]
+    people = [p["full_name"] for p in org.participants(m["team_id"], m["project_id"])][:25]
+    with db.connect() as c:
+        projects = [r[0] for r in c.execute("SELECT name FROM projects ORDER BY id")][:15]
+    prompt = "Mbledhje pune në shqip (dialekt kosovar), me fjalë në anglisht."
+    if people:
+        prompt += " Pjesëmarrës: " + ", ".join(people) + "."
+    if projects:
+        prompt += " Projekte: " + ", ".join(projects) + "."
+    if words:
+        prompt += " " + ", ".join(dict.fromkeys(words)) + "."
+    return prompt[:800]
+
+
 def _transcribe(meeting_id, m):
     import transcribe as transcriber  # scripts/transcribe.py (loads faster-whisper)
 
@@ -89,6 +114,7 @@ def _transcribe(meeting_id, m):
         m["file_path"], model_name=m["model"], language=m["language_hint"] or None,
         diarize=has_hf_token(), diarize_required=False,
         on_info=on_info, on_segment=on_segment, on_diarize=on_diarize,
+        initial_prompt=vocabulary_prompt(m),
     )
     db.save_transcript(meeting_id, data)
     return data

@@ -1318,7 +1318,7 @@ function openUpload(startMode = 'file') {
   sel.replaceChildren(...state.status.models.map((m) => el('option', { value: m, text: m, selected: m === state.status.default_model })));
   document.getElementById('f-model-hint').textContent = state.status.gpu
     ? 'GPU u gjet: large-v3 jep saktësinë më të mirë.'
-    : 'Pa GPU: “small” është i shpejtë; “medium” më i saktë por më i ngadalshëm; “large-v3” shumë i ngadalshëm në CPU.';
+    : 'Për shqip rekomandohet “large-v3” (më i sakti). Pa GPU është i ngadalshëm: një mbledhje 1-orëshe mund të zgjasë rreth 1–2 orë. “small” është i shpejtë, por gabon shumë në shqip.';
   setMode(startMode);
   dlg.showModal();
 }

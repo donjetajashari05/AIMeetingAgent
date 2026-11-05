@@ -41,7 +41,8 @@ def load_model(name):
 
 def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
                      num_speakers=None, min_speakers=None, max_speakers=None,
-                     on_segment=None, on_info=None, on_diarize=None, diarize_required=True):
+                     on_segment=None, on_info=None, on_diarize=None, diarize_required=True,
+                     initial_prompt=None):
     """
     Transcribe an audio file and return a dict with segments (and utterances
     with speaker labels when diarize=True).
@@ -49,6 +50,8 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
     on_info(info) is called once the language/duration are known;
     on_segment(segment_dict, info) is called for every transcribed segment;
     on_diarize() is called when diarization starts.
+    initial_prompt: names and words likely to be said (dialect, slang, English terms);
+    it steers Whisper toward the right spelling.
     With diarize_required=False a diarization failure is stored in
     data["diarization_error"] instead of raising.
     """
@@ -59,6 +62,7 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
         language=language,
         vad_filter=True,   # skips silence, which speeds things up and reduces errors
         beam_size=5,
+        initial_prompt=initial_prompt,
         word_timestamps=diarize,  # word-level times are needed to match speakers
     )
     if on_info:
