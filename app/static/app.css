@@ -457,6 +457,32 @@ button.quote:hover { color: var(--text); background: var(--surface-3); }
 .outbox-row details { font-size: 13px; color: var(--muted); }
 .outbox-row pre { white-space: pre-wrap; font-family: var(--font); font-size: 13px; margin: 8px 0 0; padding: 12px; border-radius: 12px; background: var(--surface-2); }
 
+/* Lines corrected by Claude: a small yellow mark; the original is in the tooltip */
+.line.fixed .t { position: relative; }
+.line.fixed .t::after { content: ''; position: absolute; left: 0; top: 22px; width: 6px; height: 6px; border-radius: 50%; background: var(--yellow); }
+
+/* ---------- Tickets ---------- */
+.ticket { gap: 14px; }
+.ticket.ready { border-color: #CBEBD9; }
+.ticket.sent { opacity: 0.92; }
+.ticket-head { display: flex; align-items: center; gap: 12px; }
+.ticket-head .grow { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ticket-check { width: 20px; height: 20px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+.ticket-title { margin: 0; font-family: var(--display); font-size: 17px; font-weight: 600; color: var(--heading); }
+.ticket .field textarea { min-height: 64px; font-family: var(--font); font-size: 14px; }
+.ticket-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.ticket-actions .spacer, .ticket-footer .spacer { flex: 1; }
+.ticket-footer { position: sticky; bottom: 16px; display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+  border-radius: 999px; background: var(--surface); border: 1px solid var(--line-2); box-shadow: 0 12px 32px rgba(61, 20, 102, 0.16); }
+.send-list { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 14px; }
+.send-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 14px; }
+.send-row:first-child { border-top: 0; }
+.send-row .grow { flex: 1; min-width: 0; }
+
+.done-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.done-list li { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--muted); }
+.done-list li > span:first-child { color: var(--green); margin-top: 3px; }
+
 /* ---------- Toast ---------- */
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
   padding: 12px 20px; border-radius: 999px; background: var(--heading); color: #fff; font-size: 14px; font-weight: 600;
@@ -469,3 +495,45 @@ button.quote:hover { color: var(--text); background: var(--surface-3); }
 .draft-pill, .ok-pill { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
 .draft-pill { background: color-mix(in srgb, #F3CB50 30%, transparent); color: var(--text); }
 .ok-pill { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); }
+
+/* ---------- Tasks -> tickets ---------- */
+.task input.pick { accent-color: var(--brand, var(--accent)); border-radius: 4px; }
+.task.is-picked { background: color-mix(in srgb, var(--accent) 7%, transparent); margin: 0 -12px; padding-left: 12px; padding-right: 12px; border-radius: 12px; }
+.task input.pick:disabled { opacity: .35; cursor: not-allowed; }
+.ticket-pill { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text); text-decoration: none; }
+.ticket-pill:hover { text-decoration: underline; }
+.btn.active { background: var(--surface-3); }
+details.sources { font-size: 14px; color: var(--muted); }
+details.sources summary { cursor: pointer; font-weight: 600; color: var(--text); }
+details.sources ul { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; }
+
+/* ---------- Transcript fixes ---------- */
+.edit-hint { display: flex; align-items: flex-start; gap: 6px; margin: -4px 0 0; }
+.edit-hint svg { flex-shrink: 0; margin-top: 2px; }
+.line { user-select: text; }
+.line.edited .txt { text-decoration: underline dotted color-mix(in srgb, var(--accent) 60%, transparent); text-underline-offset: 4px; }
+.line.editing { background: var(--surface-2); cursor: default; }
+.line-input { width: 100%; font: inherit; font-size: 15px; line-height: 1.6; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--accent); background: var(--surface, #fff); color: var(--text); resize: vertical; }
+.line-edit-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.line-edit-actions .spacer { flex: 1; }
+
+/* ---------- Vocabulary ---------- */
+.vocab-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.vocab-row .wrong { text-decoration: line-through; color: var(--subtle); }
+.vocab-row .right { color: var(--heading, var(--text)); }
+.vocab-row .grow { flex: 1; min-width: 120px; }
+.vocab-row.is-off { opacity: .55; }
+.quote.editable { cursor: text; }
+.quote.editable:hover, .quote.editable:focus-visible { outline: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: 2px; }
+.quote-edit { display: grid; gap: 4px; }
+.field.recipient { max-width: 460px; }
+.icon-btn.is-on { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ---------- Simplified flow ---------- */
+.nav-label { display: block; margin: 18px 12px 6px; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; opacity: .6; }
+.ai-group { padding-top: 10px; }
+.ai-group + .ai-group { border-top: 1px solid var(--line); margin-top: 6px; }
+.ai-who { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--heading, var(--text)); }
+.ai-group .task:first-of-type { border-top: 0; }

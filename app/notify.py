@@ -45,20 +45,20 @@ def meeting_processed(meeting_id):
         pm, project = _pm_of_meeting(c, m)
     if not pm:
         return
-    lines = [f"Përshëndetje {pm['full_name'].split()[0]},",
-             f"Mbledhja “{m['title']}” ({m['meeting_date']}) e projektit {project} u përpunua.",
-             "PËRMBLEDHJA\n" + (m["summary"] or "—")]
+    lines = [f"Hi {pm['full_name'].split()[0]},",
+             f"The meeting “{m['title']}” ({m['meeting_date']}) of the {project} project has been processed.",
+             "SUMMARY\n" + (m["summary"] or "—")]
     if m["decisions"]:
-        lines.append("VENDIMET\n" + "\n".join(f"• {d['description']}" for d in m["decisions"]))
+        lines.append("DECISIONS\n" + "\n".join(f"• {d['description']}" for d in m["decisions"]))
     if m["tasks"]:
-        lines.append("DETYRAT\n" + "\n".join(
-            f"• {t['description']} — {t['assignee_name'] or 'pa përgjegjës'}"
-            + (f", afati {t['due_date']}" if t["due_date"] else "") for t in m["tasks"]))
-        lines.append("Detyrat janë draft: kontrolloji, ndryshoji dhe konfirmoji te faqja e mbledhjes. Asgjë nuk shkon në Jira pa konfirmimin tënd.")
+        lines.append("TASKS\n" + "\n".join(
+            f"• {t['description']} — {t['assignee_name'] or 'unassigned'}"
+            + (f", due {t['due_date']}" if t["due_date"] else "") for t in m["tasks"]))
+        lines.append("Open the meeting, tick the action items that belong together and click “Make ticket”. Nothing goes to Jira until you send it.")
     if m["open_questions"]:
-        lines.append("ÇËSHTJE TË HAPURA\n" + "\n".join(f"• {q}" for q in m["open_questions"]))
-    mailer.send(pm["email"], f"Mbledhja u përpunua: {m['title']}", "\n\n".join(lines), kind="meeting",
-                link=f"{mailer.app_url()}/#/meeting/{meeting_id}", link_text="Hap mbledhjen")
+        lines.append("OPEN QUESTIONS\n" + "\n".join(f"• {q}" for q in m["open_questions"]))
+    mailer.send(pm["email"], f"Meeting processed: {m['title']}", "\n\n".join(lines), kind="meeting",
+                link=f"{mailer.app_url()}/#/meeting/{meeting_id}", link_text="Open the meeting")
     db.update_meeting(meeting_id, notified_at=db.now())
 
 
@@ -79,26 +79,26 @@ def send_daily_reminders(today=None):
                        m.title AS meeting, p.name AS project, t.jira_key
                 FROM tasks t JOIN meetings m ON m.id = t.meeting_id JOIN projects p ON p.id = m.project_id
                 LEFT JOIN employees e ON e.id = t.assignee_id
-                WHERE p.pm_id = ? AND t.status = 'open' AND t.due_date IS NOT NULL AND t.due_date <= ?
+                WHERE p.pm_id = ? AND t.status = 'open' AND t.merged_from IS NULL AND t.due_date IS NOT NULL AND t.due_date <= ?
                 ORDER BY t.due_date
             """, (pm["id"], tomorrow)))
             c.execute("INSERT OR IGNORE INTO reminder_log (pm_id, sent_on) VALUES (?, ?)", (pm["id"], today.isoformat()))
             if tasks:
                 digests.append((pm, tasks))
 
-    fmt = lambda t: (f"• {t['description']} — {t['who'] or 'pa përgjegjës'} ({t['project']}, afati {t['due_date']})"
+    fmt = lambda t: (f"• {t['description']} — {t['who'] or 'unassigned'} ({t['project']}, due {t['due_date']})"
                      + (f" [{t['jira_key']}]" if t["jira_key"] else ""))
     for pm, tasks in digests:
         late = [t for t in tasks if t["due_date"] < today.isoformat()]
         soon = [t for t in tasks if t["due_date"] >= today.isoformat()]
-        parts = [f"Përshëndetje {pm['full_name'].split()[0]},"]
+        parts = [f"Hi {pm['full_name'].split()[0]},"]
         if late:
-            parts.append(f"ME VONESË ({len(late)})\n" + "\n".join(map(fmt, late)))
+            parts.append(f"LATE ({len(late)})\n" + "\n".join(map(fmt, late)))
         if soon:
-            parts.append(f"SKADOJNË SOT OSE NESËR ({len(soon)})\n" + "\n".join(map(fmt, soon)))
-        subject = (f"Përkujtues: {len(late)} detyra me vonesë" if late else f"Përkujtues: {len(soon)} detyra skadojnë së shpejti")
+            parts.append(f"DUE TODAY OR TOMORROW ({len(soon)})\n" + "\n".join(map(fmt, soon)))
+        subject = (f"Reminder: {len(late)} late task(s)" if late else f"Reminder: {len(soon)} task(s) due soon")
         mailer.send(pm["email"], subject, "\n\n".join(parts), kind="reminder",
-                    link=f"{mailer.app_url()}/#/tasks", link_text="Shiko detyrat")
+                    link=f"{mailer.app_url()}/#/tasks", link_text="View tasks")
     return len(digests)
 
 

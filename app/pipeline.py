@@ -12,17 +12,21 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from . import db, notify, org
+from . import db, learning, notify, org
 
 sys.path.insert(0, str(db.ROOT / "scripts"))
 
+import correct as corrector  # noqa: E402  (scripts/correct.py)
 import extract as extractor  # noqa: E402  (scripts/extract.py)
+import llm  # noqa: E402  (scripts/llm.py)
+import vocab  # noqa: E402  (scripts/vocab.py)
 
 _jobs: "queue.Queue[tuple[str, int]]" = queue.Queue()
 
 
 def has_claude_key():
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    """True when any language model is configured (Claude or Groq; see scripts/llm.py)."""
+    return llm.available()
 
 
 def has_hf_token():
@@ -59,7 +63,7 @@ def _process(meeting_id):
         with open(m["file_path"], encoding="utf-8") as f:
             data = json.load(f)
         if not (data.get("segments") or data.get("utterances")):
-            raise ValueError("Skedari JSON nuk ka 'segments' ose 'utterances'.")
+            raise ValueError("The JSON file has no 'segments' or 'utterances'.")
         db.save_transcript(meeting_id, data)
     else:
         data = _transcribe(meeting_id, m)
@@ -67,40 +71,32 @@ def _process(meeting_id):
     _extract(meeting_id, data)
 
 
-GLOSSARY_FILE = db.ROOT / "data" / "fjalori.txt"
-
-
-def vocabulary_prompt(m):
-    """Hint for Whisper: the team's names, project names and the words in data/fjalori.txt.
-    Whisper reads only ~200 tokens of it, so it is kept short."""
-    words = []
-    if GLOSSARY_FILE.is_file():
-        for line in GLOSSARY_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.split("#", 1)[0].strip()
-            if line:
-                words += [w.strip() for w in line.split(",") if w.strip()]
+def _context(m):
+    """Vocabulary (data/fjalori.txt), the meeting's people and the project names."""
     people = [p["full_name"] for p in org.participants(m["team_id"], m["project_id"])][:25]
     with db.connect() as c:
         projects = [r[0] for r in c.execute("SELECT name FROM projects ORDER BY id")][:15]
-    prompt = "Mbledhje pune në shqip (dialekt kosovar), me fjalë në anglisht."
-    if people:
-        prompt += " Pjesëmarrës: " + ", ".join(people) + "."
-    if projects:
-        prompt += " Projekte: " + ", ".join(projects) + "."
-    if words:
-        prompt += " " + ", ".join(dict.fromkeys(words)) + "."
-    return prompt[:800]
+    glossary = vocab.load_glossary()
+    # Words learned from the PM's transcript fixes come first, so they fit in Whisper's hotwords
+    known = {g["term"].lower() for g in glossary}
+    learned = [{"term": w, "meaning": None} for w in learning.hotword_terms() if w.lower() not in known]
+    return learned + glossary, people, projects
+
+
+def vocabulary_prompt(m):
+    """Hint for Whisper: the team's names, project names and the words in data/fjalori.txt."""
+    return vocab.whisper_prompt(*_context(m))
 
 
 def _transcribe(meeting_id, m):
     import transcribe as transcriber  # scripts/transcribe.py (loads faster-whisper)
 
-    db.update_meeting(meeting_id, status="transcribing", progress=0, note="Po ngarkohet modeli…", error=None)
+    db.update_meeting(meeting_id, status="transcribing", progress=0, note="Loading the model…", error=None)
     state = {"last": 0.0}
 
     def on_info(info):
         db.update_meeting(meeting_id, duration_sec=round(info.duration, 1), language=info.language,
-                          note=f"Gjuha: {info.language}")
+                          note=f"Language: {info.language}")
 
     def on_segment(seg, info):
         if time.time() - state["last"] > 1:  # don't write to the DB on every segment
@@ -108,14 +104,18 @@ def _transcribe(meeting_id, m):
             db.update_meeting(meeting_id, progress=min(seg["end"] / max(info.duration, 1), 0.99))
 
     def on_diarize():
-        db.update_meeting(meeting_id, status="diarizing", progress=1, note="Po identifikohen folësit…")
+        db.update_meeting(meeting_id, status="diarizing", progress=1, note="Identifying speakers…")
 
+    glossary, people, projects = _context(m)
     data = transcriber.transcribe_audio(
         m["file_path"], model_name=m["model"], language=m["language_hint"] or None,
         diarize=has_hf_token(), diarize_required=False,
         on_info=on_info, on_segment=on_segment, on_diarize=on_diarize,
-        initial_prompt=vocabulary_prompt(m),
+        initial_prompt=vocab.whisper_prompt(glossary, people, projects),
+        hotwords=vocab.hotwords(glossary, people, projects),
     )
+    # Mistakes the team already fixed by hand on earlier meetings are fixed again here
+    data["learned_fixes"] = learning.apply_to_data(data)
     db.save_transcript(meeting_id, data)
     return data
 
@@ -127,15 +127,30 @@ def _extract(meeting_id, data=None):
 
     if not has_claude_key():
         db.update_meeting(meeting_id, status="needs_key", progress=1,
-                          note="Transkripti është gati. Shto ANTHROPIC_API_KEY për vendimet dhe detyrat.")
+                          note="The transcript is ready. Add GROQ_API_KEY (free) or ANTHROPIC_API_KEY for decisions and tasks.")
         return
 
-    db.update_meeting(meeting_id, status="extracting", progress=1, note="Claude po nxjerr vendimet dhe detyrat…",
-                      error=None)
     people = org.participants(m["team_id"], m["project_id"])
+    glossary = vocab.load_glossary()
+
+    # 1) Fix misheard words (once per meeting; "Analyze again" doesn't redo it)
+    if data.get("corrected") is None and os.environ.get("TRANSCRIPT_CORRECTION", "1") != "0":
+        db.update_meeting(meeting_id, status="extracting", progress=1, error=None,
+                          note=f"{llm.label()} is fixing misheard words…")
+        try:
+            corrector.apply_corrections(
+                data, glossary, [p["full_name"] for p in people], learned=learning.examples(),
+                on_progress=lambda d, t: db.update_meeting(meeting_id, note=f"{llm.label()} is correcting the transcript ({d}/{t} lines)…"))
+            db.save_transcript(meeting_id, data)  # also re-indexes search with the corrected text
+        except Exception:
+            traceback.print_exc()  # a failed correction must not block the analysis
+
+    # 2) Summary, decisions, tasks
+    db.update_meeting(meeting_id, status="extracting", progress=1, note=f"{llm.label()} is extracting decisions and tasks…",
+                      error=None)
     try:
         notes = extractor.extract(extractor.transcript_text(data), date.fromisoformat(m["meeting_date"]),
-                                  participants=people)
+                                  participants=people, glossary=glossary)
     except SystemExit as e:  # extract.py signals refusals / truncation this way
         raise RuntimeError(str(e))
     db.save_notes(meeting_id, notes.model_dump())
@@ -143,7 +158,7 @@ def _extract(meeting_id, data=None):
 
     note = None
     if data.get("diarization_error"):
-        note = "Pa folës: " + data["diarization_error"]
+        note = "No speakers: " + data["diarization_error"]
     db.update_meeting(meeting_id, status="done", progress=1, note=note)
     try:
         notify.meeting_processed(meeting_id)  # email the project's PM

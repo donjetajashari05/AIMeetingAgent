@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="sq">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -14,50 +14,53 @@
   <div class="login-card">
     <img src="/brand/logo.svg" alt="AnchorzUp" class="login-logo">
     <span class="eyebrow accent">Meeting Agent</span>
-    <h1 id="login-title">Hyr me emailin e punës</h1>
-    <p class="muted" id="login-sub">Do të marrësh një kod 6-shifror në email.</p>
+    <h1 id="login-title">Sign in with your work email</h1>
+    <p class="muted" id="login-sub">You’ll get a 6-digit code by email.</p>
     <form id="login-email-form" class="login-form">
-      <label class="field">Emaili i punës
-        <input type="email" id="login-email" autocomplete="email" required placeholder="emri@anchorzup.com">
+      <label class="field">Work email
+        <input type="email" id="login-email" autocomplete="email" required placeholder="name@anchorzup.com">
       </label>
-      <button type="submit" class="btn btn-primary btn-block">Dërgo kodin</button>
+      <button type="submit" class="btn btn-primary btn-block">Send code</button>
     </form>
     <form id="login-code-form" class="login-form" hidden>
-      <label class="field">Kodi nga emaili
+      <label class="field">Code from the email
         <input type="text" id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required placeholder="000000" class="code-input">
       </label>
-      <button type="submit" class="btn btn-primary btn-block">Hyr</button>
-      <button type="button" class="btn btn-block" id="login-back">Përdor email tjetër</button>
+      <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+      <button type="button" class="btn btn-block" id="login-back">Use a different email</button>
     </form>
     <p class="form-error" id="login-error" role="alert"></p>
   </div>
 </main>
 <div class="shell" id="shell" hidden>
   <aside class="sidebar">
-    <a class="brand" href="#/" aria-label="AnchorzUp Meeting Agent, paneli">
+    <a class="brand" href="#/" aria-label="AnchorzUp Meeting Agent, dashboard">
       <img src="/brand/logo-white.svg" alt="AnchorzUp" class="brand-logo">
       <span class="brand-product">Meeting Agent</span>
     </a>
-    <button type="button" class="btn btn-light btn-block" data-action="upload" data-role="manager"><span data-icon="plus"></span>Mbledhje e re</button>
-    <nav class="nav" aria-label="Navigimi kryesor">
-      <a href="#/" data-route="home"><span data-icon="grid"></span>Paneli</a>
-      <a href="#/meetings" data-route="meetings"><span data-icon="mic"></span>Mbledhjet</a>
-      <a href="#/tasks" data-route="tasks"><span data-icon="check"></span>Detyrat<span class="nav-count" id="open-count"></span></a>
-      <a href="#/ask" data-route="ask"><span data-icon="chat"></span>Pyet arkivin</a>
-      <a href="#/team" data-route="team" data-role="admin"><span data-icon="users"></span>Ekipi</a>
-      <a href="#/outbox" data-route="outbox" data-role="admin"><span data-icon="mail"></span>Njoftimet</a>
+    <button type="button" class="btn btn-light btn-block" data-action="upload" data-role="manager"><span data-icon="plus"></span>New meeting</button>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="#/" data-route="home"><span data-icon="grid"></span>Dashboard</a>
+      <a href="#/meetings" data-route="meetings"><span data-icon="mic"></span>Meetings</a>
+      <a href="#/tasks" data-route="tasks"><span data-icon="check"></span>Tasks<span class="nav-count" id="open-count"></span></a>
+      <a href="#/tickets" data-route="tickets" data-role="manager"><span data-icon="jira"></span>Tickets<span class="nav-count" id="ticket-count"></span></a>
+      <a href="#/ask" data-route="ask"><span data-icon="chat"></span>Ask the archive</a>
+      <span class="nav-label" data-role="admin">Settings</span>
+      <a href="#/team" data-route="team" data-role="admin"><span data-icon="users"></span>Team</a>
+      <a href="#/vocabulary" data-route="vocabulary" data-role="admin"><span data-icon="book"></span>Vocabulary</a>
+      <a href="#/outbox" data-route="outbox" data-role="admin"><span data-icon="mail"></span>Emails sent</a>
     </nav>
     <div class="integrations" data-role="admin">
-      <span class="eyebrow">Lidhjet</span>
-      <div class="integration"><span class="dot" id="st-claude"></span>Claude API<small id="st-claude-t"></small></div>
-      <div class="integration"><span class="dot" id="st-speakers"></span>Folësit<small id="st-speakers-t"></small></div>
-      <div class="integration"><span class="dot" id="st-email"></span>Email (Gmail)<small id="st-email-t"></small></div>
+      <span class="eyebrow">Connections</span>
+      <div class="integration"><span class="dot" id="st-claude"></span>AI<small id="st-claude-t"></small></div>
+      <div class="integration"><span class="dot" id="st-speakers"></span>Speakers<small id="st-speakers-t"></small></div>
+      <div class="integration"><span class="dot" id="st-email"></span>Email<small id="st-email-t"></small></div>
       <div class="integration"><span class="dot" id="st-jira"></span>Jira<small id="st-jira-t"></small></div>
     </div>
     <div class="me" id="me">
       <span class="avatar" id="me-avatar"></span>
       <span class="me-text"><strong id="me-name"></strong><small id="me-role"></small></span>
-      <button type="button" class="icon-btn" id="logout" aria-label="Dil" title="Dil"><span data-icon="logout"></span></button>
+      <button type="button" class="icon-btn" id="logout" aria-label="Sign out" title="Sign out"><span data-icon="logout"></span></button>
     </div>
   </aside>
   <main class="content" id="view" tabindex="-1"></main>
@@ -66,62 +69,62 @@
 <dialog id="upload-dialog" class="dialog">
   <form method="dialog" id="upload-form" class="dialog-body">
     <div class="dialog-head">
-      <h2>Mbledhje e re</h2>
-      <button type="button" class="icon-btn" data-close aria-label="Mbyll"><span data-icon="x"></span></button>
+      <h2>New meeting</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="x"></span></button>
     </div>
     <div class="tabs" role="tablist">
-      <button type="button" role="tab" class="tab active" data-mode="file" aria-selected="true">Ngarko skedar</button>
-      <button type="button" role="tab" class="tab" data-mode="record" aria-selected="false">Regjistro tani</button>
+      <button type="button" role="tab" class="tab active" data-mode="file" aria-selected="true">Upload a file</button>
+      <button type="button" role="tab" class="tab" data-mode="record" aria-selected="false">Record now</button>
     </div>
 
     <div data-pane="file">
       <label class="drop" id="drop">
         <input type="file" id="file-input" accept=".mp3,.wav,.m4a,.webm,.ogg,.mp4,.flac,.aac,.json">
         <span data-icon="upload"></span>
-        <strong id="drop-title">Zgjidh ose tërhiq regjistrimin këtu</strong>
-        <small id="drop-sub">mp3, wav, m4a, webm… ose një transkript .json</small>
+        <strong id="drop-title">Choose or drop the recording here</strong>
+        <small id="drop-sub">mp3, wav, m4a, webm… or a .json transcript</small>
       </label>
     </div>
 
     <div data-pane="record" hidden>
       <div class="recorder">
-        <button type="button" class="rec-btn" id="rec-btn" aria-label="Fillo regjistrimin"><span></span></button>
+        <button type="button" class="rec-btn" id="rec-btn" aria-label="Start recording"><span></span></button>
         <div class="rec-info">
           <strong id="rec-time">00:00</strong>
-          <small id="rec-state">Shtyp butonin për të filluar regjistrimin nga mikrofoni</small>
+          <small id="rec-state">Press the button to start recording from the microphone</small>
         </div>
       </div>
     </div>
 
     <div class="field-grid">
-      <label class="field field-wide">Titulli
-        <input type="text" id="f-title" placeholder="p.sh. Sinkronizimi javor" maxlength="200">
+      <label class="field field-wide">Title
+        <input type="text" id="f-title" placeholder="e.g. Weekly sync" maxlength="200">
       </label>
-      <label class="field">Data e mbledhjes
+      <label class="field">Meeting date
         <input type="date" id="f-date" required>
       </label>
-      <label class="field">Ekipi
+      <label class="field">Team
         <select id="f-team"></select>
       </label>
-      <label class="field">Projekti
+      <label class="field">Project
         <select id="f-project"></select>
       </label>
-      <label class="field">Gjuha
+      <label class="field">Spoken language
         <select id="f-lang">
-          <option value="">Automatike</option>
-          <option value="sq">Shqip</option>
+          <option value="sq" selected>Albanian (with English words)</option>
+          <option value="">Detect automatically</option>
           <option value="en">English</option>
         </select>
       </label>
-      <label class="field field-wide">Modeli i transkriptimit
+      <label class="field field-wide">Transcription model
         <select id="f-model"></select>
         <small id="f-model-hint"></small>
       </label>
     </div>
     <p class="form-error" id="upload-error" role="alert"></p>
     <div class="dialog-actions">
-      <button type="button" class="btn" data-close>Anulo</button>
-      <button type="submit" class="btn btn-primary" id="upload-submit" disabled>Fillo përpunimin</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn btn-primary" id="upload-submit" disabled>Start processing</button>
     </div>
   </form>
 </dialog>

@@ -56,13 +56,24 @@ MIGRATIONS = {
         "project_id": "INTEGER REFERENCES projects(id) ON DELETE SET NULL",
         "created_by": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",
         "notified_at": "TEXT",
+        "completed": "TEXT",   # JSON list: work reported as already done (not tickets)
     },
     "tasks": {
         "assignee_id": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",
         "jira_key": "TEXT",
         "jira_url": "TEXT",
         "jira_error": "TEXT",
-        "approved_at": "TEXT",   # NULL = draft from the AI; the PM must confirm before Jira
+        "approved_at": "TEXT",   # NULL = untouched AI draft; set when the PM edits it (kept by "Analyze again")
+        # Ticket review (page "Tickets"): the PM decides who gets the ticket and where it goes
+        "assignee_email": "TEXT",  # recipient's work email; NULL = the linked employee's email
+        "details": "TEXT",         # extra description for the Jira ticket
+        "jira_project": "TEXT",    # Jira project key for this ticket; NULL = the project's key
+        "sent_at": "TEXT",
+        "sent_by": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",
+        # Tasks -> tickets: a ticket is made from one or more tasks (page "Tasks")
+        "is_ticket": "INTEGER NOT NULL DEFAULT 0",  # 1 = shown on the Tickets page
+        "merged_from": "TEXT",                       # ticket row: JSON list of the source task ids
+        "merged_into": "INTEGER",                    # task row: the ticket it became part of
     },
     "employees": {
         "is_admin": "INTEGER NOT NULL DEFAULT 0",
@@ -85,6 +96,9 @@ def init():
             for col, decl in cols.items():
                 if col not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                    if (table, col) == ("tasks", "is_ticket"):
+                        # Before tickets were made by hand, every confirmed or sent task was a ticket
+                        c.execute("UPDATE tasks SET is_ticket = 1 WHERE approved_at IS NOT NULL OR jira_key IS NOT NULL")
 
 
 class OrgError(ValueError):
@@ -106,7 +120,8 @@ def overview():
         tm = db.rows(c.execute("SELECT * FROM team_members"))
         pm = db.rows(c.execute("SELECT * FROM project_members"))
         open_tasks = {r["assignee_id"]: r["n"] for r in c.execute(
-            "SELECT assignee_id, COUNT(*) AS n FROM tasks WHERE status = 'open' AND assignee_id IS NOT NULL GROUP BY assignee_id")}
+            "SELECT assignee_id, COUNT(*) AS n FROM tasks WHERE status = 'open' AND assignee_id IS NOT NULL "
+            "AND merged_from IS NULL GROUP BY assignee_id")}
     for e in employees:
         e["team_ids"] = [r["team_id"] for r in tm if r["employee_id"] == e["id"]]
         e["project_ids"] = [r["project_id"] for r in pm if r["employee_id"] == e["id"]]
@@ -147,17 +162,17 @@ def _add_to_project_team(c, project_id, employee_ids):
 def save_employee(data, employee_id=None):
     name = _clean(data.get("full_name"))
     if not name:
-        raise OrgError("Emri është i detyrueshëm.")
+        raise OrgError("The name is required.")
     email = (_clean(data.get("email")) or "").lower() or None
     if email and not EMAIL_RE.match(email):
-        raise OrgError("Emaili nuk është i vlefshëm.")
+        raise OrgError("The email is not valid.")
     values = (name, email, _clean(data.get("role")),
               _clean(data.get("aliases"), 300), 1 if data.get("active", True) else 0)
     with db.connect() as c:
         # The email is the login: it must belong to one person only
         if email and c.execute("SELECT 1 FROM employees WHERE email = ? COLLATE NOCASE AND id != ?",
                                (email, employee_id or -1)).fetchone():
-            raise OrgError(f"Emaili {email} i përket tashmë një punonjësi tjetër.")
+            raise OrgError(f"The email {email} already belongs to another employee.")
         if employee_id is None:
             employee_id = c.execute(
                 "INSERT INTO employees (full_name, email, role, aliases, active, created_at) VALUES (?,?,?,?,?,?)",
@@ -166,7 +181,7 @@ def save_employee(data, employee_id=None):
             cur = c.execute("UPDATE employees SET full_name=?, email=?, role=?, aliases=?, active=? WHERE id=?",
                             (*values, employee_id))
             if not cur.rowcount:
-                raise OrgError("Punonjësi nuk u gjet.")
+                raise OrgError("Employee not found.")
         if "is_admin" in data:
             c.execute("UPDATE employees SET is_admin = ? WHERE id = ?", (1 if data["is_admin"] else 0, employee_id))
         project_ids = set(data.get("project_ids") or [])
@@ -198,17 +213,17 @@ def save_group(kind, data, group_id=None):
     """kind = 'team' or 'project'."""
     name = _clean(data.get("name"), 120)
     if not name:
-        raise OrgError("Emri është i detyrueshëm.")
+        raise OrgError("The name is required.")
     table, members, key = ("teams", "team_members", "team_id") if kind == "team" else \
                           ("projects", "project_members", "project_id")
     cols = {"name": name, "description": _clean(data.get("description"), 500)}
     if kind == "project":
         if not data.get("team_id"):
-            raise OrgError("Zgjidh ekipin të cilit i përket projekti.")
+            raise OrgError("Choose the team the project belongs to.")
         cols["team_id"] = data["team_id"]
         jira_key = (_clean(data.get("jira_key"), 10) or "").upper() or None
         if jira_key and not JIRA_KEY_RE.match(jira_key):
-            raise OrgError("Çelësi i Jira duhet të jetë si në Jira, p.sh. PAY ose HR2 (shkronja të mëdha).")
+            raise OrgError("The Jira key must match Jira, e.g. PAY or HR2 (capital letters).")
         cols["jira_key"] = jira_key
         cols["pm_id"] = data.get("pm_id") or None
         if cols["pm_id"]:
@@ -224,9 +239,9 @@ def save_group(kind, data, group_id=None):
                 cur = c.execute(f"UPDATE {table} SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
                                 (*cols.values(), group_id))
                 if not cur.rowcount:
-                    raise OrgError("Nuk u gjet.")
+                    raise OrgError("Not found.")
         except db.sqlite3.IntegrityError:
-            raise OrgError(f"Ekziston tashmë një {'ekip' if kind == 'team' else 'projekt'} me emrin “{name}”.")
+            raise OrgError(f"A {kind} named “{name}” already exists.")
         if "member_ids" in data:
             _set_links(c, members, "employee_id", key, group_id, data.get("member_ids"))
         if kind == "team":
@@ -276,7 +291,7 @@ def import_csv(text):
             if not name or (n == 1 and name.lower() in ("emri", "name", "full_name", "emri i plotë")):
                 continue
             if len(name) > 200:
-                errors.append(f"Rreshti {n}: emri është shumë i gjatë.")
+                errors.append(f"Line {n}: the name is too long.")
                 continue
             existing = None
             if email:
@@ -348,7 +363,9 @@ def match_employee(name, candidates):
 
 def link_assignees(meeting_id, candidates):
     with db.connect() as c:
-        for t in db.rows(c.execute("SELECT id, assignee FROM tasks WHERE meeting_id = ?", (meeting_id,))):
+        # Only the AI's drafts: the PM's own links on confirmed tasks and tickets stay
+        for t in db.rows(c.execute("SELECT id, assignee FROM tasks WHERE meeting_id = ? AND approved_at IS NULL "
+                                   "AND jira_key IS NULL AND is_ticket = 0", (meeting_id,))):
             c.execute("UPDATE tasks SET assignee_id = ? WHERE id = ?",
                       (match_employee(t["assignee"], candidates), t["id"]))
 
@@ -359,7 +376,14 @@ def set_task_assignee(task_id, employee_id):
         if employee_id:
             row = c.execute("SELECT full_name FROM employees WHERE id = ?", (employee_id,)).fetchone()
             if not row:
-                raise OrgError("Punonjësi nuk u gjet.")
+                raise OrgError("Employee not found.")
             name = row["full_name"]
-        c.execute("UPDATE tasks SET assignee_id = ?, assignee = COALESCE(?, assignee) WHERE id = ?",
+        # assignee_email = NULL: the ticket goes to the (new) employee's own email
+        c.execute("UPDATE tasks SET assignee_id = ?, assignee = COALESCE(?, assignee), assignee_email = NULL WHERE id = ?",
                   (employee_id, name, task_id))
+
+
+def employee_by_email(email):
+    with db.connect() as c:
+        r = c.execute("SELECT * FROM employees WHERE email = ? COLLATE NOCASE AND active = 1", (email,)).fetchone()
+        return dict(r) if r else None

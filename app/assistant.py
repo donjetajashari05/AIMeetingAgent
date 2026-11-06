@@ -1,15 +1,18 @@
 """
-"Pyet arkivin": find relevant passages from past meetings and let Claude
-answer with numbered sources.
+"Ask the archive": find relevant passages from past meetings and let the language
+model (Claude or Groq, see scripts/llm.py) answer with numbered sources.
 
 Retrieval is full-text search for now; step 5 replaces it with embeddings
 (pgvector) without changing this interface.
 """
-import anthropic
+import sys
 
 from . import db
 
-MODEL = "claude-opus-5-5"
+if str(db.ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(db.ROOT / "scripts"))
+
+import llm  # noqa: E402  (scripts/llm.py)
 
 SYSTEM_PROMPT = """You answer questions about a team's past meetings using ONLY the
 numbered excerpts provided. Answer in the language of the question, in 1-4 sentences.
@@ -19,35 +22,23 @@ If the excerpts do not contain the answer, say so plainly instead of guessing.""
 
 def _format_source(i, s):
     where = f"{s['meeting_title']} ({s['meeting_date']})"
-    kind = {"summary": "përmbledhje", "decision": "vendim", "task": "detyrë"}.get(s["kind"])
+    kind = {"summary": "summary", "decision": "decision", "task": "task"}.get(s["kind"])
     prefix = f"{s['speaker']}: " if s.get("speaker") else (f"[{kind}] " if kind else "")
     return f"[{i}] {where}: {prefix}{s['text']}"
 
 
 def ask(question, has_key, meeting_ids=None):
-    """meeting_ids: the meetings this user may see (None = all)."""
+    """meeting_ids: the meetings this user may see (None = all). Raises llm.LLMError."""
     sources = db.search(question, meeting_ids=meeting_ids)
     for i, s in enumerate(sources, 1):
         s["n"] = i
 
     if not sources:
-        return {"answer": "Nuk gjeta asgjë për këtë në mbledhjet e ruajtura.", "sources": [], "ai": False}
+        return {"answer": "I found nothing about this in the saved meetings.", "sources": [], "ai": False}
     if not has_key:
-        return {"answer": "Këto janë pjesët më të afërta që u gjetën. Shto ANTHROPIC_API_KEY "
-                          "që Claude të japë përgjigje të plotë.", "sources": sources, "ai": False}
+        return {"answer": "These are the closest passages found. Add GROQ_API_KEY or ANTHROPIC_API_KEY "
+                          "for a full AI answer.", "sources": sources, "ai": False}
 
     excerpts = "\n".join(_format_source(i, s) for i, s in enumerate(sources, 1))
-    client = anthropic.Anthropic()
-    response = client.beta.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"<excerpts>\n{excerpts}\n</excerpts>\n\nQuestion: {question}"}],
-        output_config={"effort": "low"},
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-    )
-    if response.stop_reason == "refusal":
-        return {"answer": "Modeli nuk e përpunoi këtë pyetje.", "sources": sources, "ai": False}
-    answer = "".join(b.text for b in response.content if b.type == "text").strip()
+    answer = llm.text(SYSTEM_PROMPT, f"<excerpts>\n{excerpts}\n</excerpts>\n\nQuestion: {question}", max_tokens=2000)
     return {"answer": answer, "sources": sources, "ai": True}

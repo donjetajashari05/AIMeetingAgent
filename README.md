@@ -43,6 +43,18 @@ Pastaj hap http://127.0.0.1:8000 në shfletues. Serveri dëgjon vetëm në kët�
   Kur mbledhja lidhet me një ekip/projekt, Claude i merr emrat e anëtarëve dhe detyrat lidhen
   me punonjësit (edhe sipas nofkave). Përgjegjësi mund të ndërrohet me dorë te detyra.
 
+### AI: Claude ose Groq (falas, për testim)
+
+Analiza, korrigjimi dhe “Pyet arkivin” punojnë me njërin nga këta (`scripts/llm.py`):
+
+| `.env` | Ofruesi |
+|--------|---------|
+| `ANTHROPIC_API_KEY=sk-ant-…` | Claude (përdoret kur ekziston) |
+| `GROQ_API_KEY=gsk_…` | Groq, falas, me `GROQ_MODEL` (parazgjedhur `openai/gpt-oss-120b`) |
+
+`LLM_PROVIDER=groq` ose `anthropic` e detyron njërin. Me Groq transkriptet dërgohen te serverat e Groq;
+përdore vetëm për testim, jo për mbledhje konfidenciale.
+
 ### Hyrja dhe rolet
 
 Hyrja bëhet me emailin e punës: shkruan emailin, merr një kod 6-shifror (vlen 10 minuta).
@@ -101,6 +113,33 @@ Për GPU NVIDIA duhen CUDA 12 dhe cuDNN 9. Pa GPU, skripta punon automatikisht n
    ```bash
    python scripts/evaluate_wer.py data/reference/mbledhja1.txt output/mbledhja1.txt
    ```
+
+## Shqipja e folur: fjalori dhe korrigjimi
+
+Transkriptimi i shqipes përmirësohet në tri shtresa:
+
+1. **Fjalori** (`data/fjalori.txt`): fjalët e dialektit, zhargonit, termat në anglisht dhe emrat.
+   Whisper i merr si `initial_prompt` (stili + emrat) dhe `hotwords` (fjalët, për gjithë regjistrimin).
+   Me `fjala = kuptimi`, Claude e kupton edhe kuptimin.
+2. **Korrigjimi me Claude** (`scripts/correct.py`): ndreq vetëm fjalët e dëgjuara gabim sipas kontekstit,
+   pa e kthyer dialektin në gjuhë letrare. Origjinali ruhet (`raw`) dhe shihet te faqja e mbledhjes.
+3. **Analiza** i kupton fjalët jozyrtare dhe i shkruan detyrat në shqip standard.
+
+Për ta matur efektin (WER) për tezën:
+
+```bash
+python scripts/transcribe.py data/audio/mbledhja1.mp3 --no-vocab --out output/pa_fjalor
+python scripts/transcribe.py data/audio/mbledhja1.mp3 --out output/me_fjalor
+python scripts/correct.py output/me_fjalor/mbledhja1.json --out output/me_fjalor
+python scripts/evaluate_wer.py data/reference/mbledhja1.txt output/pa_fjalor/mbledhja1.txt
+python scripts/evaluate_wer.py data/reference/mbledhja1.txt output/me_fjalor/mbledhja1.txt
+python scripts/evaluate_wer.py data/reference/mbledhja1.txt output/me_fjalor/mbledhja1_corrected.txt
+```
+
+| Mbledhja | Modeli | Pa fjalor | Me fjalor | Me fjalor + korrigjim |
+|----------|--------|-----------|-----------|-----------------------|
+| mbledhja2 (sq) | large-v3 | | | |
+| mbledhja3 (sq + en) | large-v3 | | | |
 
 ## Eksperimentet e fazës 1
 

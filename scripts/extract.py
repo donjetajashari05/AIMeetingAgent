@@ -15,13 +15,14 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+import llm
+
 load_dotenv()
 
-MODEL = "claude-opus-5-5"
+MODEL = llm.CLAUDE_MODEL
 
 WEEKDAYS_SQ = ["e hënë", "e martë", "e mërkurë", "e enjte", "e premte", "e shtunë", "e diel"]
 WEEKDAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -30,37 +31,60 @@ WEEKDAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday
 # ---------- Output schema ----------
 
 class Decision(BaseModel):
-    description: str = Field(description="What was decided, in one clear sentence")
-    quote: str = Field(description="Short verbatim quote from the transcript that supports it")
+    description: str = Field(description="What was decided, in one clear sentence, in English")
+    quote: str = Field(description="Short verbatim quote from the transcript that supports it (original language)")
 
 
 class Task(BaseModel):
-    description: str = Field(description="What has to be done, as a concrete action")
+    description: str = Field(description="What still has to be done, as a concrete action in English "
+                                         "(this becomes a ticket title, e.g. 'Fix the login page bug')")
     assignee: str | None = Field(description="Person responsible: their name if mentioned, "
                                              "otherwise the speaker label (e.g. 'Folësi 2'); null if nobody")
     due_date: str | None = Field(description="Deadline as YYYY-MM-DD, resolved against the meeting date; "
                                              "null if no deadline was mentioned")
     due_date_text: str | None = Field(description="The deadline exactly as it was said, e.g. 'deri të premten'")
-    quote: str = Field(description="Short verbatim quote from the transcript that supports it")
+    quote: str = Field(description="Short verbatim quote from the transcript that supports it (original language)")
 
 
 class MeetingNotes(BaseModel):
-    summary: str = Field(description="Summary of the meeting in 3-6 sentences")
+    summary: str = Field(description="Summary of the meeting in 3-6 sentences, in English")
+    completed: list[str] = Field(description="Work people reported as ALREADY DONE (yesterday or before the "
+                                             "meeting), one short English line each. These are NOT tasks.")
     decisions: list[Decision]
-    tasks: list[Task]
-    open_questions: list[str] = Field(description="Questions or topics left unresolved")
+    tasks: list[Task] = Field(description="Only work that is NOT done yet: planned, in progress, next, or blocked")
+    open_questions: list[str] = Field(description="Questions, blockers or topics left unresolved, in English")
 
 
 # ---------- Prompt ----------
 
-SYSTEM_PROMPT = """You extract structured meeting notes from transcripts of work meetings.
-Meetings are in Albanian, English, or a mix of both. Write every field in the main
-language of the meeting.
+SYSTEM_PROMPT = """You extract structured meeting notes from transcripts of work meetings at a
+software company. Meetings are in Albanian (often the Kosovo/Gheg dialect), English, or a mix.
+
+LANGUAGE: write the summary, completed items, decisions, tasks and open questions in clear,
+professional ENGLISH, whatever language the meeting was in. Tasks become Jira tickets, so a
+task description is a short imperative ticket title ("Fix the database connection issues in
+the user authentication API"). Only quotes and due_date_text stay exactly as spoken, in the
+original language.
+
+DONE vs TO DO (very important): many meetings are stand-ups where people first say what they
+did yesterday, then what they will do today. Work that is already finished is NOT a task:
+- Past/finished: "e kam kry", "e kam përfundu", "kam përfundu tiketën", "dje kam punu",
+  "e kom bo", "e kemi mbyll", "u kry", "done", "finished", "e kam testu" -> put it in
+  `completed` (and the summary), never in `tasks`.
+- Still to do: "sot kam me...", "masnej/pastaj...", "duhet me...", "kam me e bo", "do e bëj",
+  "jam tu punu", "e kam fillu", "next I'll", "tomorrow" -> a task.
+- Started but not finished ("e kam kry pjesën kryesore, po kam probleme me ...", "besoj sot e
+  përfundoj"): the REMAINING part is a task; the finished part goes to `completed`.
+- A problem that blocks someone ("më kanë dalë probleme me database connections") becomes a
+  task to resolve it when someone says they will handle it, otherwise an open question.
 
 Rules:
 - Only include decisions that were actually agreed, not ideas that were just mentioned.
 - A task needs a concrete action. If someone volunteers ("I'll do it", "unë e marr")
-  or is asked and accepts, they are the assignee.l
+  or is asked and accepts, they are the assignee.
+- People speak informally, with English work terms ("qysh me e bo deploy", "kqyre ate
+  taskun", "s'kom pas kohë") and the speech recognizer makes spelling mistakes. Understand
+  the meaning; a vocabulary with the team's words and their meanings may be given.
 - Use a person's name when it is clear from the conversation who a speaker is
   (e.g. someone says "Arta, can you..." and Folësi 2 answers "Yes"). Otherwise use
   the speaker label as written in the transcript.
@@ -109,32 +133,23 @@ def participants_text(people):
     return "\n".join(lines)
 
 
-def extract(transcript, meeting_date: date, client=None, participants=None) -> MeetingNotes:
-    client = client or anthropic.Anthropic()
-    team = (f"Team members:\n<team_members>\n{participants_text(participants)}\n</team_members>\n\n"
+def extract(transcript, meeting_date: date, client=None, participants=None, glossary=None) -> MeetingNotes:
+    """glossary: [{"term", "meaning"}] from data/fjalori.txt (slang, dialect, work terms).
+    Uses Claude or Groq (see llm.py); raises llm.LLMError with a readable message."""
+    team =(f"Team members:\n<team_members>\n{participants_text(participants)}\n</team_members>\n\n"
             if participants else "")
+    vocab = ""
+    if glossary:
+        from vocab import glossary_text
+        vocab = f"Team vocabulary:\n<vocabulary>\n{glossary_text(glossary)}\n</vocabulary>\n\n"
     user_message = (
         f"Meeting date: {meeting_date.isoformat()} ({WEEKDAYS_EN[meeting_date.weekday()]})\n\n"
         f"Calendar:\n{calendar_hint(meeting_date)}\n\n"
-        f"{team}"
+        f"{team}{vocab}"
         f"<transcript>\n{transcript}\n</transcript>"
     )
-    response = client.beta.messages.parse(
-        model=MODEL,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-        output_format=MeetingNotes,
-        output_config={"effort": "medium"},
-        # If the model declines, the API retries on a fallback model in the same call
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-    )
-    if response.stop_reason == "refusal":
-        raise SystemExit("The model declined to process this transcript.")
-    if response.stop_reason == "max_tokens":
-        raise SystemExit("The response was cut off (max_tokens). Try a shorter transcript.")
-    return validate_dates(response.parsed_output)
+    notes = llm.structured(SYSTEM_PROMPT, user_message, MeetingNotes, max_tokens=16000, effort="medium")
+    return validate_dates(notes)
 
 
 def validate_dates(notes: MeetingNotes) -> MeetingNotes:
@@ -180,22 +195,16 @@ def main():
 
     if not Path(args.transcript).is_file():
         raise SystemExit(f"File not found: {args.transcript}")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("ANTHROPIC_API_KEY is missing. Create a key at "
-                         "https://platform.claude.com/settings/keys and put "
-                         "ANTHROPIC_API_KEY=sk-ant-... in the .env file.")
+    if not llm.available():
+        raise SystemExit(llm.NO_KEY)
     meeting_date = date.fromisoformat(args.date) if args.date else date.today()
 
     transcript, data = load_transcript(args.transcript)
-    print(f"Sending transcript to {MODEL} ({len(transcript.split())} words)...\n")
+    print(f"Sending transcript to {llm.label()} ({len(transcript.split())} words)...\n")
     try:
         notes = extract(transcript, meeting_date)
-    except anthropic.AuthenticationError:
-        raise SystemExit("Invalid or missing ANTHROPIC_API_KEY. Put it in the .env file.")
-    except anthropic.RateLimitError:
-        raise SystemExit("Rate limit reached. Wait a moment and try again.")
-    except anthropic.APIConnectionError:
-        raise SystemExit("Could not reach the Anthropic API. Check the internet connection.")
+    except llm.LLMError as e:
+        raise SystemExit(str(e))
 
     print_notes(notes)
 
@@ -205,7 +214,7 @@ def main():
     out_path = out_dir / f"{name}_notes.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({"source": args.transcript, "meeting_date": meeting_date.isoformat(),
-                   "model": MODEL, **notes.model_dump()}, f, ensure_ascii=False, indent=2)
+                   "model": llm.label(), **notes.model_dump()}, f, ensure_ascii=False, indent=2)
     print(f"\nSaved to {out_path}")
 
 

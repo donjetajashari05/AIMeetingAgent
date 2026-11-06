@@ -1,7 +1,23 @@
 # Fjalori: fjalë që thuhen shpesh në mbledhje, që transkriptimi t'i shkruajë saktë.
 # Shto fjalë të ndara me presje, ose një për rresht. Rreshtat me # injorohen.
 # Mbaje të shkurtër (rreth 30-60 fjalë): modeli lexon vetëm pjesën e parë.
+#
+# Mund të shtosh edhe kuptimin, një fjalë për rresht:   fjala = kuptimi
+# Whisper merr vetëm fjalën; Claude merr edhe kuptimin, që ta kuptojë bisedën.
 
 qysh, qka, me bo, me punu, me shku, me kry, s'kom, s'kemi, a po, kqyre, najsen, tash, nesër, deri të premten
 task, deadline, sprint, review, deploy, release, bug, feature, meeting, call, update, backend, frontend
 Jira, LLM, API, transkript, agjent, Claude
+
+# Kuptimet e fjalëve jozyrtare (për Claude)
+qysh = si
+qka = çka, çfarë
+me bo = të bëj / të bësh / të bëjmë
+me punu = të punoj / të punojmë
+me shku = të shkoj / të shkojmë
+me kry = ta kryej, ta përfundoj
+s'kom = s'kam, nuk kam
+kqyre = shiko, kontrolloje
+najsen = diçka
+tash = tani
+a po = pyetje: a po? (p.sh. "a po e bon ti?" = a po e bën ti?)

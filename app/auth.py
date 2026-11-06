@@ -94,7 +94,7 @@ def request_code(email):
         hour_ago = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
         recent = c.execute("SELECT COUNT(*) FROM login_codes WHERE email = ? AND created_at > ?", (email, hour_ago)).fetchone()[0]
         if recent >= CODES_PER_HOUR:
-            raise HTTPException(429, "Shumë kërkesa për kod. Provo përsëri pas pak.")
+            raise HTTPException(429, "Too many code requests. Try again in a little while.")
         code = f"{secrets.randbelow(1_000_000):06d}"
         c.execute("UPDATE login_codes SET used = 1 WHERE email = ?", (email,))  # only the newest code works
         c.execute("INSERT INTO login_codes (email, code_hash, expires_at, created_at) VALUES (?,?,?,?)",
@@ -111,17 +111,17 @@ def verify_code(email, code):
         row = c.execute("SELECT * FROM login_codes WHERE email = ? AND used = 0 AND expires_at > ? "
                         "ORDER BY id DESC LIMIT 1", (email, db.now())).fetchone()
         if not row:
-            raise HTTPException(400, "Kodi ka skaduar ose s’ekziston. Kërko një kod të ri.")
+            raise HTTPException(400, "The code has expired or doesn’t exist. Request a new one.")
         if row["attempts"] >= CODE_MAX_ATTEMPTS:
-            raise HTTPException(400, "Shumë përpjekje të gabuara. Kërko një kod të ri.")
+            raise HTTPException(400, "Too many wrong attempts. Request a new code.")
         if not hmac.compare_digest(row["code_hash"], _hash(f"{email}:{code}")):
             c.execute("UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?", (row["id"],))
             c.commit()  # keep the failed attempt even though we raise (limits guessing)
-            raise HTTPException(400, "Kodi nuk është i saktë.")
+            raise HTTPException(400, "The code is not correct.")
         c.execute("UPDATE login_codes SET used = 1 WHERE id = ?", (row["id"],))
         emp = _employee_by_email(c, email)
         if not emp or not is_owner(emp):
-            raise HTTPException(400, "Llogaria nuk ka qasje në sistem.")
+            raise HTTPException(400, "This account has no access to the system.")
         if email in admin_emails() and not emp["is_admin"]:
             c.execute("UPDATE employees SET is_admin = 1 WHERE id = ?", (emp["id"],))
         token = secrets.token_urlsafe(32)
@@ -197,13 +197,13 @@ def current_user(request: Request):
         return _local_admin()
     user = user_from_token(request.cookies.get(SESSION_COOKIE))
     if not user:
-        raise HTTPException(401, "Hyr me emailin e punës.")
+        raise HTTPException(401, "Sign in with your work email.")
     return user
 
 
 def require_admin(user):
     if not user["is_admin"]:
-        raise HTTPException(403, "Vetëm administratori mund ta bëjë këtë.")
+        raise HTTPException(403, "Only an administrator can do this.")
 
 
 def visible_meeting_ids(user):
@@ -231,9 +231,9 @@ def check_meeting(user, meeting_id, manage=False):
     m = db.get_meeting(meeting_id)
     visible = visible_meeting_ids(user)
     if not m or (visible is not None and meeting_id not in visible):
-        raise HTTPException(404, "Mbledhja nuk u gjet.")
+        raise HTTPException(404, "Meeting not found.")
     if manage and not can_manage_meeting(user, m):
-        raise HTTPException(403, "Vetëm PM-ja i projektit ose administratori mund ta bëjë këtë.")
+        raise HTTPException(403, "Only the project’s PM or an administrator can do this.")
     return m
 
 

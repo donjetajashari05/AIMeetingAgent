@@ -42,7 +42,7 @@ def load_model(name):
 def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
                      num_speakers=None, min_speakers=None, max_speakers=None,
                      on_segment=None, on_info=None, on_diarize=None, diarize_required=True,
-                     initial_prompt=None):
+                     initial_prompt=None, hotwords=None):
     """
     Transcribe an audio file and return a dict with segments (and utterances
     with speaker labels when diarize=True).
@@ -51,7 +51,9 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
     on_segment(segment_dict, info) is called for every transcribed segment;
     on_diarize() is called when diarization starts.
     initial_prompt: names and words likely to be said (dialect, slang, English terms);
-    it steers Whisper toward the right spelling.
+    it steers Whisper toward the right spelling, but only at the start of the recording.
+    hotwords: short list of names/terms repeated for every 30-second window, so the
+    vocabulary keeps helping for the whole meeting.
     With diarize_required=False a diarization failure is stored in
     data["diarization_error"] instead of raising.
     """
@@ -61,8 +63,12 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
         str(audio),
         language=language,
         vad_filter=True,   # skips silence, which speeds things up and reduces errors
+        # Conversation: short pauses inside sentences, fast speech. A longer silence before
+        # cutting and some padding keep word endings (e.g. "-ni", "-im") from being chopped.
+        vad_parameters={"min_silence_duration_ms": 700, "speech_pad_ms": 400},
         beam_size=5,
         initial_prompt=initial_prompt,
+        hotwords=hotwords,
         word_timestamps=diarize,  # word-level times are needed to match speakers
     )
     if on_info:
@@ -115,13 +121,15 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")  # so ë/ç print correctly in the Windows console
     parser = argparse.ArgumentParser(description="Meeting transcription")
     parser.add_argument("audio", help="Path to the audio file (mp3, wav, m4a...)")
-    parser.add_argument("--model", default="large-v3", help="tiny, base, small, medium, large-v3")
+    parser.add_argument("--model", default="large-v3", help="tiny, base, small, medium, large-v3, large-v3-turbo")
     parser.add_argument("--language", default=None, help="Language code (e.g. en), or leave empty for auto-detection")
     parser.add_argument("--out", default="output", help="Directory where results are saved")
     parser.add_argument("--diarize", action="store_true", help="Detect who is speaking (pyannote.audio)")
     parser.add_argument("--speakers", type=int, default=None, help="Exact number of speakers, if known")
     parser.add_argument("--min-speakers", type=int, default=None)
     parser.add_argument("--max-speakers", type=int, default=None)
+    parser.add_argument("--no-vocab", action="store_true",
+                        help="Don't use data/fjalori.txt (to measure WER with and without the vocabulary)")
     args = parser.parse_args()
 
     if not Path(args.audio).is_file():
@@ -141,9 +149,18 @@ def main():
 
     if args.diarize:
         print("(Diarization runs after transcription.)")
+    prompt = words = None
+    if not args.no_vocab:
+        from vocab import hotwords, load_glossary, whisper_prompt
+
+        glossary = load_glossary()
+        prompt, words = whisper_prompt(glossary), hotwords(glossary)
+        print(f"Vocabulary: {len(glossary)} words from data/fjalori.txt")
     data = transcribe_audio(args.audio, args.model, args.language, args.diarize,
                             args.speakers, args.min_speakers, args.max_speakers,
-                            on_segment=show_segment, on_info=show_info)
+                            on_segment=show_segment, on_info=show_info,
+                            initial_prompt=prompt, hotwords=words)
+    data["vocab"] = not args.no_vocab
 
     if "utterances" in data:
         print(f"\nFound {len({u['speaker'] for u in data['utterances']})} speakers\n")
