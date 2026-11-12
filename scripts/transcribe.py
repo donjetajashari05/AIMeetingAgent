@@ -84,16 +84,19 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
             on_segment(item, info)
     asr_elapsed = time.time() - start
 
-    utterances, diarization_error = None, None
+    utterances, diarization_error, speaker_embeddings = None, None, None
     if diarize:
         if on_diarize:
             on_diarize()
         try:
             from diarize import assign_speakers, diarize as run_diarization
 
-            turns = run_diarization(str(audio), num_speakers=num_speakers,
-                                    min_speakers=min_speakers, max_speakers=max_speakers)
-            utterances = assign_speakers(words, turns, label=SPEAKER_LABEL)
+            turns, voice = run_diarization(str(audio), num_speakers=num_speakers, min_speakers=min_speakers,
+                                           max_speakers=max_speakers, with_embeddings=True)
+            names = {}
+            utterances = assign_speakers(words, turns, label=SPEAKER_LABEL, mapping_out=names)
+            # Voice fingerprint per "Folësi N" (the app stores them apart and removes them from the transcript)
+            speaker_embeddings = {names[raw]: vec for raw, vec in voice.items() if raw in names}
         except (Exception, SystemExit) as e:
             if diarize_required:
                 raise
@@ -112,6 +115,8 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
     }
     if utterances is not None:
         data["utterances"] = utterances
+    if speaker_embeddings:
+        data["speaker_embeddings"] = speaker_embeddings
     if diarization_error:
         data["diarization_error"] = diarization_error
     return data
@@ -174,6 +179,7 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     name = Path(args.audio).stem
+    data.pop("speaker_embeddings", None)  # voice fingerprints are personal data: never written to files
 
     with open(out_dir / f"{name}.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

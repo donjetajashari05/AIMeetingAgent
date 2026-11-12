@@ -12,7 +12,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from . import db, learning, notify, org
+from . import db, dedupe, learning, memory, notify, org, owners, standup, voices
 
 sys.path.insert(0, str(db.ROOT / "scripts"))
 
@@ -116,8 +116,60 @@ def _transcribe(meeting_id, m):
     )
     # Mistakes the team already fixed by hand on earlier meetings are fixed again here
     data["learned_fixes"] = learning.apply_to_data(data)
+    # Known voices get their names; the voice fingerprints never stay in the transcript
+    try:
+        known = voices.identify(meeting_id, data)
+        if known:
+            db.update_meeting(meeting_id, note=f"Recognized {known} {'person' if known == 1 else 'people'} by voice")
+    except Exception:
+        traceback.print_exc()  # recognition is a help: it must never stop the meeting
+    finally:
+        data.pop("speaker_embeddings", None)
     db.save_transcript(meeting_id, data)
     return data
+
+
+def _link_to_memory(notes, items, closed=()):
+    """A new task that is the same work as an earlier open item is not created again: it becomes an
+    update on that item. (If the earlier item is being closed, the task is new remaining work and stays.)
+    The same work as a ticket that was already finished reopens that ticket instead of a new one.
+    Returns (the updates for memory.save(), [(ticket, note, quote)] for memory.save_reopened())."""
+    known = {t["id"] for t in items}
+    updates = [u for u in notes.pop("previous_updates", None) or [] if u.get("item_id") in known]
+    by_id = {u["item_id"]: u for u in updates}
+    kept, reopened = [], {}
+    for t in dedupe.collapse(notes["tasks"]):  # the same task twice in this meeting
+        prev, repeat = t.pop("continues", None), False
+        if prev not in known:
+            # The AI didn't link it: compare the text with the earlier open work as well
+            match = dedupe.best_match(t["description"], items, t.get("assignee"))
+            prev, repeat = (match["id"], True) if match else (None, False)
+        if prev not in known:
+            # Finished before as a ticket: reopen that ticket, no second one
+            done = dedupe.best_match(t["description"], closed, t.get("assignee"))
+            if done:
+                due = f" (due {t['due_date']})" if t.get("due_date") else ""
+                step = f"Came up again: {t['description']}{due}"
+                if done["id"] in reopened:
+                    old = reopened[done["id"]]
+                    reopened[done["id"]] = (done, f"{old[1]} {step}", old[2] or t.get("quote"))
+                else:
+                    reopened[done["id"]] = (done, step, t.get("quote"))
+                continue
+        if prev in known and (by_id.get(prev) or {}).get("status") != "done":
+            due = f" (due {t['due_date']})" if t.get("due_date") else ""
+            step = f"{'Came up again' if repeat else 'Next step'}: {t['description']}{due}"
+            if prev in by_id:
+                u = by_id[prev]
+                u["note"] = f"{u.get('note') or ''} {step}".strip()
+            else:
+                by_id[prev] = {"item_id": prev, "status": "mentioned" if repeat else "in_progress", "note": step,
+                               "quote": t.get("quote")}
+                updates.append(by_id[prev])
+            continue
+        kept.append(t)
+    notes["tasks"] = kept
+    return updates, list(reopened.values())
 
 
 def _extract(meeting_id, data=None):
@@ -145,20 +197,47 @@ def _extract(meeting_id, data=None):
         except Exception:
             traceback.print_exc()  # a failed correction must not block the analysis
 
+    # A daily standup is a report per person: no tasks, tickets or meeting memory
+    if m.get("kind") == "standup":
+        db.update_meeting(meeting_id, status="extracting", progress=1, error=None,
+                          note=f"{llm.label()} is writing the standup report…")
+        notes = standup.analyze(meeting_id, extractor.transcript_text(data), people, glossary)
+        blocked = sum(1 for p in notes.people if p.status == "blocked")
+        db.update_meeting(meeting_id, status="done", progress=1,
+                          note=f"{blocked} blocked" if blocked else None)
+        return
+
     # 2) Summary, decisions, tasks
     db.update_meeting(meeting_id, status="extracting", progress=1, note=f"{llm.label()} is extracting decisions and tasks…",
                       error=None)
+    memory.undo(meeting_id)  # "Analyze again": earlier tasks this meeting closed are open again
+    mem = memory.context(m)
     try:
         notes = extractor.extract(extractor.transcript_text(data), date.fromisoformat(m["meeting_date"]),
-                                  participants=people, glossary=glossary)
+                                  participants=people, glossary=glossary, previous=mem["text"] or None,
+                                  on_progress=lambda text: db.update_meeting(meeting_id, note=text))
     except SystemExit as e:  # extract.py signals refusals / truncation this way
         raise RuntimeError(str(e))
-    db.save_notes(meeting_id, notes.model_dump())
+    notes = notes.model_dump()
+    for t in notes["tasks"]:
+        t.pop("commitment", None)  # only there to make the AI justify each task
+    updates, reopened = _link_to_memory(notes, mem["items"], memory.closed_tickets(m))
+    db.save_notes(meeting_id, notes)
+    closed = memory.save(meeting_id, updates, mem["items"])
+    memory.save_reopened(meeting_id, reopened)
     org.link_assignees(meeting_id, people)
+    # Work nobody took on goes to "Needs an owner"; work taken on here closes earlier such issues
+    owners.save(meeting_id, notes.get("unowned"))
+    owners.resolve_from_meeting(meeting_id)
+    no_owner = owners.count({meeting_id})
 
     note = None
     if data.get("diarization_error"):
         note = "No speakers: " + data["diarization_error"]
+    elif no_owner:
+        note = f"{no_owner} item{'s' if no_owner > 1 else ''} without an owner: give {'them' if no_owner > 1 else 'it'} to someone."
+    elif closed:
+        note = f"{closed} earlier task{'s' if closed > 1 else ''} marked done from this meeting."
     db.update_meeting(meeting_id, status="done", progress=1, note=note)
     try:
         notify.meeting_processed(meeting_id)  # email the project's PM

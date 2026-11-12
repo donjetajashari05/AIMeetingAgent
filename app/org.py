@@ -57,6 +57,8 @@ MIGRATIONS = {
         "created_by": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",
         "notified_at": "TEXT",
         "completed": "TEXT",   # JSON list: work reported as already done (not tickets)
+        "kind": "TEXT NOT NULL DEFAULT 'meeting'",  # meeting | standup (a daily standup: a report, never tasks)
+        "topics": "TEXT",      # JSON list of {title, summary}: what was discussed (most of it is not a task)
     },
     "tasks": {
         "assignee_id": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",
@@ -74,6 +76,13 @@ MIGRATIONS = {
         "is_ticket": "INTEGER NOT NULL DEFAULT 0",  # 1 = shown on the Tickets page
         "merged_from": "TEXT",                       # ticket row: JSON list of the source task ids
         "merged_into": "INTEGER",                    # task row: the ticket it became part of
+        # Jira -> app: the issue's status, read back from Jira (see jira.sync_status)
+        "jira_status": "TEXT",                       # e.g. "To Do", "In Progress", "Done"
+        "done_by_jira": "INTEGER NOT NULL DEFAULT 0",  # 1 = closed because the Jira issue is done
+        # AI suggestion from the meeting, the PM can change it (sent to Jira as priority / original estimate)
+        "priority": "TEXT",          # high | medium | low ; NULL = not set
+        "priority_reason": "TEXT",   # why, a few words
+        "estimate_hours": "REAL",    # rough effort in working hours (1 day = 8 h)
     },
     "employees": {
         "is_admin": "INTEGER NOT NULL DEFAULT 0",
@@ -353,7 +362,7 @@ def match_employee(name, candidates):
         if any(" ".join(n) == full for n in names):
             exact.append(e["id"])
         elif any(n and n[0] == words[0] for n in names) and len(words) == 1:
-            partial.append(e["id"])  # only a first name was said, e.g. "Arta"
+            partial.append(e["id"])  # only a first name was said
     if len(exact) == 1:
         return exact[0]
     if not exact and len(set(partial)) == 1:

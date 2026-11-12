@@ -15,7 +15,18 @@ from fastapi import HTTPException, Request
 from . import db
 
 SESSION_COOKIE = "ma_session"
-SESSION_DAYS = 365  # log in once
+SESSION_DAYS = 365  # used only when LOGIN_EACH_VISIT=0 (log in once)
+SESSION_HOURS = 12  # default: a sign-in lasts at most a working day
+
+
+def login_each_visit():
+    """Default on: every time the link is opened (new tab or window) the sign-in form is shown;
+    a refresh of an open tab keeps you signed in. LOGIN_EACH_VISIT=0 = stay signed in for a year."""
+    return os.environ.get("LOGIN_EACH_VISIT", "1") != "0"
+
+
+def session_length():
+    return timedelta(hours=SESSION_HOURS) if login_each_visit() else timedelta(days=SESSION_DAYS)
 CODE_MINUTES = 10
 CODE_MAX_ATTEMPTS = 5
 CODES_PER_HOUR = 5
@@ -127,7 +138,7 @@ def verify_code(email, code):
         token = secrets.token_urlsafe(32)
         c.execute("INSERT INTO sessions (token_hash, employee_id, created_at, expires_at) VALUES (?,?,?,?)",
                   (_hash(token), emp["id"], db.now(),
-                   (datetime.now() + timedelta(days=SESSION_DAYS)).isoformat(timespec="seconds")))
+                   (datetime.now() + session_length()).isoformat(timespec="seconds")))
     return token
 
 
@@ -237,22 +248,29 @@ def check_meeting(user, meeting_id, manage=False):
     return m
 
 
+def sees_tasks(user):
+    """Tasks and tickets are only for PMs and administrators: team leads and the others work on
+    them in Jira directly, so the app doesn't show them."""
+    return bool(user["is_admin"] or user["is_pm"])
+
+
 def task_scope(user):
     """(meeting_ids, assignee_id) filter for task lists. Admin: all.
-    PM: every task of their projects' meetings + own. Employee: own tasks."""
+    PM: every task of their projects' meetings + own. Everyone else: none (they use Jira)."""
     if user["is_admin"]:
         return None, None
+    if not sees_tasks(user):
+        return set(), 0  # matches nothing (ids start at 1)
     if user["is_pm"]:
         with db.connect() as c:
             ids = {r[0] for r in c.execute(
                 f"SELECT id FROM meetings WHERE project_id IN ({','.join('?' * len(user['pm_project_ids']))})",
                 user["pm_project_ids"])}
         return ids, user["id"]  # tasks in those meetings OR assigned to me
-    return set(), user["id"]
 
 
 def can_edit_task(user, task, reassign=False):
     m = db.get_meeting(task["meeting_id"])
     if user["is_admin"] or (m and can_manage_meeting(user, m)):
         return True
-    return not reassign and task.get("assignee_id") == user["id"]
+    return sees_tasks(user) and not reassign and task.get("assignee_id") == user["id"]

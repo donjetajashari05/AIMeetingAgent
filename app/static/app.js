@@ -3,6 +3,7 @@
 /* ================= Helpers ================= */
 
 const ICONS = {
+  report: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   wave: '<path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   grid: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -27,6 +28,8 @@ const ICONS = {
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   jira: '<path d="M12 3l9 9-9 9-9-9z"/><path d="M12 8l4 4-4 4-4-4z"/>',
   layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   book: '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3M9 7h6"/>',
 };
 
@@ -90,7 +93,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const MONTHS_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 // Readable on white (text ≥ 4.5:1) and as avatar backgrounds under white text
-const SPEAKER_COLORS = ['#683790', '#17794E', '#946200', '#B8336A', '#1F7A99', '#C2410C'];
+const SPEAKER_COLORS = ['#7646D6', '#17794E', '#946200', '#B8336A', '#1F7A99', '#C2410C'];
 
 const parseDate = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -123,6 +126,62 @@ function duePill(task) {
   const label = diff < 7 ? `${DAYS[d.getDay()].slice(0, 3)}, ${fmtShort(task.due_date)}` : fmtShort(task.due_date);
   return el('span', { class: 'pill soon', text: label, title: task.due_date });
 }
+
+const PRIORITY = { high: 'High', medium: 'Medium', low: 'Low' };
+
+/** 4 -> "4h", 1.5 -> "1.5h", 12 -> "1.5d", 16 -> "2d" (1 day = 8 h). */
+function fmtEstimate(h) {
+  if (!h) return '';
+  const n = (x) => String(Math.round(x * 10) / 10);
+  return h >= 8 ? `${n(h / 8)}d` : `${n(h)}h`;
+}
+
+/** Priority (and the AI's reason as a tooltip) of a task or ticket; the effort estimate only for tickets
+ *  (it is a Jira field, so it is shown where the Jira fields are filled). */
+function planPills(t, { estimate = false } = {}) {
+  return [
+    t.priority ? el('span', { class: `pill prio prio-${t.priority}`, text: PRIORITY[t.priority] || t.priority,
+      title: t.priority_reason ? `Priority: ${t.priority_reason}` : 'Priority' }) : null,
+    estimate && t.estimate_hours ? el('span', { class: 'pill est', text: `~${fmtEstimate(t.estimate_hours)}`,
+      title: `Estimated effort: ${t.estimate_hours} working hours` }) : null,
+  ];
+}
+
+function priorityInput(value, emptyText = '— Not set —') {
+  return el('select', {},
+    el('option', { value: '', text: emptyText, selected: !value }),
+    Object.entries(PRIORITY).map(([k, v]) => el('option', { value: k, text: v, selected: value === k })));
+}
+
+/** Hours -> Jira time format: 12 -> "1d 4h", 0.5 -> "30m" (1w = 5d, 1d = 8h, as in Jira). */
+function jiraTime(h) {
+  if (!h) return '';
+  let m = Math.round(h * 60);
+  const out = [];
+  for (const [unit, size] of [['w', 2400], ['d', 480], ['h', 60], ['m', 1]]) {
+    if (m >= size) { out.push(`${Math.floor(m / size)}${unit}`); m %= size; }
+  }
+  return out.join(' ');
+}
+
+/** Jira time format -> hours: "1d 4h" -> 12, "30m" -> 0.5, "4" -> 4. Empty -> null; throws when it can't be read. */
+function parseJiraTime(text) {
+  const s = text.trim().toLowerCase();
+  if (!s) return null;
+  if (/^\d+([.,]\d+)?$/.test(s)) return Number(s.replace(',', '.'));
+  const size = { w: 40, d: 8, h: 1, m: 1 / 60 };
+  let hours = 0;
+  const rest = s.replace(/(\d+(?:[.,]\d+)?)\s*([wdhm])/g, (_, n, u) => { hours += Number(n.replace(',', '.')) * size[u]; return ''; });
+  if (rest.trim() || !hours) throw new Error(`Original estimate “${text}” isn’t valid. Use the Jira format, e.g. 3h, 1d 4h, 30m.`);
+  return Math.round(hours * 100) / 100;
+}
+
+function estimateInput(value, placeholder = 'e.g. 3h, 1d 4h') {
+  return el('input', { type: 'text', value: jiraTime(value), placeholder, maxlength: '30', autocomplete: 'off' });
+}
+
+const planBody = (prio, est) => ({ priority: prio.value,
+  ...(est ? { estimate_hours: parseJiraTime(est.value), set_estimate: true } : {}) });
 
 const STATUS = {
   queued: ['Queued', 'work'],
@@ -180,6 +239,7 @@ async function loadStatus() {
 }
 
 async function refreshOpenCount() {
+  if (!isManager()) return;  // tasks and tickets are for PMs; the others work in Jira
   try {
     const tasks = await api('/api/tasks?status=open');
     document.getElementById('open-count').textContent = tasks.length || '';
@@ -187,6 +247,9 @@ async function refreshOpenCount() {
       // Tickets waiting for the PM: still to review or ready to send
       const tickets = await api('/api/tickets');
       document.getElementById('ticket-count').textContent = tickets.filter((t) => !t.jira_key && t.status !== 'done').length || '';
+      const loose = await api('/api/owners');
+      state.ownerCount = loose.issues.length + loose.tasks.length;
+      document.getElementById('owner-count').textContent = state.ownerCount || '';
     }
   } catch { /* ignore */ }
 }
@@ -204,20 +267,31 @@ function poll(fn, ms = 2500) {
 async function route() {
   stopPolling();
   if (state.cleanup) { state.cleanup(); state.cleanup = null; }
+  // Tickets are a part of the Tasks page now: old links (emails, bookmarks) still work
+  if (/^#\/tickets(\?|$)/.test(location.hash)) {
+    const q = new URLSearchParams(location.hash.split('?')[1] || '');
+    if (q.get('tab') !== 'sent') q.set('tab', 'send');
+    location.replace(`#/tasks?${q}`);
+    return;
+  }
   const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
   const [name, id] = hash.split('/');
-  const key = name === 'meeting' ? 'meetings' : (name || 'home');
+  const key = name === 'meeting' ? 'meetings' : name === 'standup' ? 'standups' : (name || 'home');
   document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === key));
 
   view.replaceChildren(el('div', { class: 'page' }, el('div', { class: 'thinking' }, el('span', { class: 'spinner' }), 'Loading…')));
   try {
     if (name === 'meeting' && id) await renderMeeting(Number(id));
     else if (name === 'meetings') await renderMeetings();
-    else if (name === 'tasks') await renderTasks();
-    else if (name === 'tickets' && isManager()) await renderTickets();
+    else if (name === 'standups' && isManager()) await renderStandups();
+    else if (name === 'standup' && id && isManager()) await renderStandup(Number(id));
+    else if (name === 'tasks' && isManager()) await renderWork();
+    else if (name === 'owners' && isManager()) await renderOwners();
     else if (name === 'ask') renderAsk();
+    else if (name === 'weekly' && isManager()) await renderWeekly();
     else if (name === 'team' && isAdmin()) await renderTeam();
     else if (name === 'outbox' && isAdmin()) await renderOutbox();
+    else if (name === 'security' && isAdmin()) await renderSecurity();
     else if (name === 'vocabulary' && isAdmin()) await renderVocabulary();
     else await renderHome();
   } catch (e) {
@@ -281,10 +355,12 @@ function taskForm(meetingId, task, reload) {
     state.org.employees.filter((e) => e.active || e.id === t.assignee_id)
       .map((e) => el('option', { value: e.id, text: e.full_name, selected: e.id === t.assignee_id })));
   const due = el('input', { type: 'date', value: t.due_date || '' });
+  const prio = priorityInput(t.priority);
   openForm(task ? 'Edit task' : 'New task', [
     el('div', { class: 'field-grid' },
-      field('Task', desc),
+      field('Summary', desc),
       field('Assignee', who, { wide: false }),
+      field('Priority', prio, { wide: false, hint: t.priority_reason ? `AI: ${t.priority_reason}` : null }),
       field('Due date', due, { wide: false, hint: t.due_date_text ? `Said in the meeting: “${t.due_date_text}”` : null })),
   ], {
     saveText: task ? 'Save' : 'Add task',
@@ -292,12 +368,15 @@ function taskForm(meetingId, task, reload) {
       const assignee = who.value ? Number(who.value) : null;
       if (task) {
         await api(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({
-          description: desc.value, due_date: due.value || null, set_due_date: true,
+          description: desc.value, due_date: due.value || null, set_due_date: true, ...planBody(prio),
           ...(assignee !== task.assignee_id ? { assignee_id: assignee, set_assignee: true } : {}) }) });
         toast('Task saved.');
       } else {
-        await api(`/api/meetings/${meetingId}/tasks`, { method: 'POST', body: JSON.stringify({
+        const added = await api(`/api/meetings/${meetingId}/tasks`, { method: 'POST', body: JSON.stringify({
           description: desc.value, due_date: due.value || null, assignee_id: assignee }) });
+        if (prio.value) {
+          await api(`/api/tasks/${added.id}`, { method: 'PATCH', body: JSON.stringify(planBody(prio)) });
+        }
         toast('Task added.');
       }
       reload();
@@ -316,11 +395,11 @@ function ticketPill(task) {
   if (task.merged_into) {
     const key = task.ticket_jira_key;
     return el('a', {
-      class: key ? 'jira-link' : 'ticket-pill', href: `#/tickets?tab=${key ? 'sent' : 'send'}`,
+      class: key ? 'jira-link' : 'ticket-pill', href: `#/tasks?tab=${key ? 'sent' : 'send'}`,
       title: `In the ticket: ${task.ticket_title || ''}`,
     }, key ? `In ${key}` : 'In a ticket');
   }
-  if (task.is_ticket && !task.jira_key) return el('a', { class: 'ticket-pill', href: '#/tickets', text: 'Ticket' });
+  if (task.is_ticket && !task.jira_key) return el('a', { class: 'ticket-pill', href: '#/tasks?tab=send', text: 'Ticket' });
   return null;
 }
 
@@ -357,8 +436,9 @@ function taskRow(task, { showMeeting = false, onChange, assignable = false, read
   const meta = el('div', { class: 'meta' },
     who,
     duePill(task),
+    task.status !== 'done' ? planPills(task) : null,
     task.due_date_text ? el('span', { class: 'subtle', text: `“${task.due_date_text}”` }) : null,
-    task.jira_key ? el('a', { class: 'jira-link', href: task.jira_url, target: '_blank', rel: 'noopener', text: task.jira_key, title: 'Open in Jira' }) : null,
+    task.jira_key ? el('a', { class: 'jira-link', href: task.jira_url, target: '_blank', rel: 'noopener', text: task.jira_key + (task.jira_status ? ` · ${task.jira_status}` : ''), title: task.done_by_jira ? 'Done in Jira' : 'Open in Jira' }) : null,
     ticketPill(task),
     !task.jira_key && task.jira_error ? el('span', { class: 'jira-error', text: `Jira: ${task.jira_error}` }) : null,
     showMeeting ? el('a', { href: `#/meeting/${task.meeting_id}`, class: 'small', text: task.meeting_title }) : null,
@@ -418,7 +498,13 @@ function meetingRow(m) {
 
 /* ---------- Ask (RAG) ---------- */
 
-const EXAMPLES = ['What did we decide about the budget?', 'Which tasks does Arta have?', 'What is still unresolved?'];
+const EXAMPLES = ['What did we decide last week?', 'Which tasks are overdue?', 'What is still unresolved?', 'Çka ka mbetur hapur këtë javë?'];
+const SOURCE_KIND = { task: 'Task', ticket: 'Ticket', decision: 'Decision', summary: 'Meeting summary', said: 'Said', utterance: 'Said' };
+
+function sourceLink(s) {
+  if (s.kind === 'task' && s.meeting_title === 'Written ticket') return '#/tasks?tab=send';
+  return `#/meeting/${s.meeting_id}${s.start != null ? `?t=${Math.floor(s.start)}` : ''}`;
+}
 
 function renderAnswer(container, res) {
   const parts = res.answer.split(/(\[\d+\])/g).map((p) => (/^\[\d+\]$/.test(p) ? el('span', { class: 'cite', text: p }) : p));
@@ -428,12 +514,13 @@ function renderAnswer(container, res) {
     el('div', { class: 'answer-mark' }, icon('wave', 16, 2.2)),
     el('div', { class: 'answer-body' },
       el('p', { class: 'answer-text' }, ...parts),
-      sources.length ? el('div', { class: 'source-list' }, sources.map((s) => el('a', {
-        class: 'source', href: `#/meeting/${s.meeting_id}${s.start != null ? `?t=${Math.floor(s.start)}` : ''}`,
-      },
+      sources.length ? el('div', { class: 'source-list' }, sources.map((s) => el('a', { class: 'source', href: sourceLink(s) },
       el('span', { class: 'n', text: `[${s.n}]` }),
       el('span', {},
-        el('span', { class: 'meta', text: `${s.meeting_title} · ${fmtShort(s.meeting_date)}${s.start != null ? ` · ${fmtClock(s.start)}` : ''}` }),
+        el('span', { class: 'meta' },
+          SOURCE_KIND[s.kind === 'task' && s.is_ticket ? 'ticket' : s.kind] ? el('span', { class: `src-kind ${s.kind}${s.status === 'done' ? ' done' : ''}`,
+            text: SOURCE_KIND[s.kind === 'task' && s.is_ticket ? 'ticket' : s.kind] + (s.status === 'done' ? ' · done' : '') }) : null,
+          `${s.meeting_title} · ${fmtShort(s.meeting_date)}${s.start != null ? ` · ${fmtClock(s.start)}` : ''}`),
           (s.speaker ? `${s.speaker}: ` : '') + s.text)))) : null)));
 }
 
@@ -451,11 +538,13 @@ function askBox({ onAsk, autofocus = false }) {
   return { form, input, chips };
 }
 
-async function runAsk(q, input, send, out) {
+async function runAsk(q, input, send, out, history = null) {
   input.disabled = true; send.disabled = true;
-  out.replaceChildren(el('div', { class: 'thinking' }, el('span', { class: 'spinner' }), 'Searching past meetings…'));
+  out.replaceChildren(el('div', { class: 'thinking' }, el('span', { class: 'spinner' }), 'Reading the meetings, tasks and decisions…'));
   try {
-    renderAnswer(out, await api('/api/ask', { method: 'POST', body: JSON.stringify({ question: q }) }));
+    const res = await api('/api/ask', { method: 'POST', body: JSON.stringify({ question: q, history: history || [] }) });
+    renderAnswer(out, res);
+    if (history) history.push({ q, a: res.answer });
   } catch (e) {
     out.replaceChildren(notice('error', 'alert', e.message));
   } finally {
@@ -492,7 +581,12 @@ function newMeetingButtons() {
 /* ---------- Home ---------- */
 
 async function renderHome() {
-  const [meetings, report, tasks] = await Promise.all([api('/api/meetings'), api('/api/report'), api('/api/tasks?status=open')]);
+  // Tasks and tickets are only for PMs and administrators; the others see the meetings
+  const manager = isManager();
+  const [meetings, report, tasks, loose] = await Promise.all([api('/api/meetings'),
+    manager ? api('/api/report') : null, manager ? api('/api/tasks?status=open') : [],
+    manager ? api('/api/owners') : { issues: [], tasks: [] }]);
+  const nLoose = loose.issues.length + loose.tasks.length;
 
   const out = el('div', { class: 'hero-answer', hidden: true });
   const ask = askBox({ onAsk: (q, i, s) => { out.hidden = false; runAsk(q, i, s, out); } });
@@ -515,8 +609,7 @@ async function renderHome() {
   const meetingsSlot = el('div', { class: 'col-3 stack' });
 
   const paint = (list) => {
-    // Employees don't add meetings, so they get their tasks there instead
-    processingSlot.replaceChildren(isManager() ? processingCard(list) : openTasksCard(tasks));
+    if (manager) processingSlot.replaceChildren(processingCard(list));
     meetingsSlot.replaceChildren(recentMeetingsCard(list));
   };
   paint(meetings);
@@ -524,8 +617,11 @@ async function renderHome() {
   view.replaceChildren(el('div', { class: 'page' },
     hero,
     isAdmin() ? keyNotice() : null,
-    el('div', { class: 'row' }, el('div', { class: 'col-3 stack' }, reportCard(report)), processingSlot),
-    el('div', { class: 'row' }, meetingsSlot, isManager() ? el('div', { class: 'col-2 stack' }, openTasksCard(tasks)) : null),
+    nLoose ? notice('warn', 'alert', el('strong', { text: `${nLoose} item${nLoose === 1 ? '' : 's'} without an owner. ` }),
+      'Discussed in meetings, but nobody was given ', nLoose === 1 ? 'it' : 'them', '. ',
+      el('a', { href: '#/owners', text: 'Give them to someone →' })) : null,
+    manager ? el('div', { class: 'row' }, el('div', { class: 'col-3 stack' }, reportCard(report)), processingSlot) : null,
+    el('div', { class: 'row' }, meetingsSlot, manager ? el('div', { class: 'col-2 stack' }, openTasksCard(tasks)) : null),
   ));
 
   if (meetings.some(isBusy)) {
@@ -643,7 +739,46 @@ async function renderMeetings() {
 
 /* ---------- Tasks ---------- */
 
-async function renderTasks() {
+/** One page for the PM's work: the tasks from meetings, and the tickets made from them
+ *  ("To send" before Jira, "Sent" after). #/tasks, #/tasks?tab=send, #/tasks?tab=sent (+ &meeting=id). */
+async function renderWork() {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const tab = ['send', 'sent'].includes(params.get('tab')) ? params.get('tab') : 'tasks';
+  const meeting = params.get('meeting');
+  const host = el('div', { class: 'stack' });
+  const tabsBar = el('div', { class: 'filter work-tabs', role: 'tablist', 'aria-label': 'Tasks and tickets' });
+  const go = (k) => {
+    const q = new URLSearchParams();
+    if (k !== 'tasks') q.set('tab', k);
+    if (meeting) q.set('meeting', meeting);
+    location.hash = `#/tasks${q.toString() ? `?${q}` : ''}`;
+  };
+  const recount = async () => {
+    const [tasks, tickets] = await Promise.all([api('/api/tasks?status=open'), api('/api/tickets')]);
+    const inMeeting = (t) => !meeting || t.meeting_id === Number(meeting);
+    const counts = {
+      tasks: tasks.filter(inMeeting).length,
+      send: tickets.filter((t) => inMeeting(t) && !t.jira_key && t.status !== 'done').length,
+      sent: tickets.filter((t) => inMeeting(t) && t.jira_key).length,
+    };
+    tabsBar.replaceChildren(...[['tasks', 'Tasks'], ['send', 'Tickets to send'], ['sent', 'Sent to Jira']].map(([k, label]) => el('button', {
+      type: 'button', role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k),
+      text: `${label} ${counts[k]}`, onclick: () => go(k),
+    })));
+    refreshOpenCount();
+  };
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('From your projects’ meetings', 'Tasks',
+      el('button', { type: 'button', class: 'btn btn-primary', onclick: () => newTicketForm(async () => { if (tab === 'send') await renderWork(); else go('send'); }) },
+        icon('plus', 16, 2.2), 'New ticket')),
+    tabsBar,
+    host));
+  await recount();
+  if (tab === 'tasks') await renderTasks(host, recount);
+  else await renderTickets(host, tab, recount);
+}
+
+async function renderTasks(host, recount) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   let meetingFilter = Number(params.get('meeting')) || null;
   let [all] = await Promise.all([api('/api/tasks'), loadOrg()]);
@@ -661,7 +796,7 @@ async function renderTasks() {
   el('option', { value: 'none', text: 'Not linked to an employee' }),
   state.org.employees.map((e) => el('option', { value: e.id, text: e.full_name })));
 
-  const reloadTasks = async () => { all = await api('/api/tasks'); refreshOpenCount(); paint(); };
+  const reloadTasks = async () => { all = await api('/api/tasks'); recount(); paint(); };
   const picker = taskPicker(reloadTasks);
   const { pick, footer } = picker;
   // Edit opens the ticket when the task is part of one (all ticket editing happens here)
@@ -688,12 +823,12 @@ async function renderTasks() {
   };
   paint();
   const meetingTitle = meetingFilter && (all.find((t) => t.meeting_id === meetingFilter) || {}).meeting_title;
-  view.replaceChildren(el('div', { class: 'page' },
-    pageHead(isManager() ? 'From your projects’ meetings' : 'Assigned to you', isManager() ? 'Tasks' : 'My tasks',
-      isManager() ? personSel : null, filterBar),
-    isManager() ? el('p', { class: 'muted', text: 'Tick the tasks that belong together and click “Make ticket”: the AI writes one Jira ticket from them. ✓ on the right marks a task as done.' }) : null,
-    meetingTitle ? el('div', { class: 'chips' }, el('button', { type: 'button', class: 'chip active', title: 'Clear filter',
-      onclick: () => { meetingFilter = null; location.hash = '#/tasks'; } }, `Only: ${meetingTitle}`, icon('x', 14, 2.2))) : null,
+  host.replaceChildren(...nn(
+    el('p', { class: 'muted', text: 'Tick the tasks that belong together and click “Make ticket”: the AI writes one Jira ticket from them, and it moves to “Tickets to send”. ✓ on the right marks a task as done; tickets moved to Done in Jira are marked done here automatically.' }),
+    el('div', { class: 'card-head work-filters' },
+      meetingTitle ? el('button', { type: 'button', class: 'chip active', title: 'Clear filter',
+        onclick: () => { location.hash = '#/tasks'; } }, `Only: ${meetingTitle}`, icon('x', 14, 2.2)) : el('span'),
+      el('div', { class: 'actions' }, personSel, filterBar)),
     listSlot, footer));
   const editId = Number(params.get('edit'));
   if (editId && isManager()) edit({ id: editId });
@@ -703,21 +838,116 @@ async function renderTasks() {
 
 function renderAsk() {
   const chat = el('div', { class: 'chat' });
+  const history = [];  // follow-up questions ("and Blerim?") see the earlier ones
+  const newChat = el('button', { type: 'button', class: 'btn btn-sm', hidden: true,
+    onclick: () => { history.length = 0; chat.replaceChildren(); newChat.hidden = true; } }, icon('retry', 14, 2), 'New conversation');
   const ask = askBox({
     autofocus: true,
     onAsk: (q, input, send) => {
       const out = el('div');
       chat.append(el('div', { class: 'chat-q', text: q }), out);
       input.value = '';
-      runAsk(q, input, send, out).then(() => { out.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); input.focus(); });
+      newChat.hidden = false;
+      runAsk(q, input, send, out, history).then(() => { out.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); input.focus(); });
     },
   });
   view.replaceChildren(el('div', { class: 'page', style: { maxWidth: '860px' } },
-    pageHead('The team’s memory', 'Ask the archive'),
+    pageHead('The team’s memory', 'Ask the archive', newChat),
     keyNotice(),
-    el('p', { class: 'muted', text: 'Searches the transcripts, decisions and tasks of every meeting and answers with the exact source.' }),
+    el('p', { class: 'muted', text: 'Ask in Albanian or English: who is doing what, what is open or overdue, what was decided, what someone said. Every answer shows its sources; you can ask follow-up questions.' }),
     el('section', { class: 'card' }, ask.form, ask.chips),
     chat));
+}
+
+/* ---------- Weekly report ---------- */
+
+function isoDay(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function shiftWeek(iso, weeks) { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + 7 * weeks); return isoDay(d); }
+function shiftMonth(iso, months) { const d = new Date(`${iso}T12:00:00`); d.setDate(1); d.setMonth(d.getMonth() + months); return isoDay(d); }
+
+async function renderWeekly() {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const week = params.get('week') || '';
+  const projectId = params.get('project') || '';
+  const period = params.get('period') === 'month' ? 'month' : 'week';
+  const monthly = period === 'month';
+  const qs = new URLSearchParams({ period, ...(week ? { week } : {}), ...(projectId ? { project_id: projectId } : {}) });
+  const [r, orgData] = await Promise.all([api(`/api/weekly?${qs}`), api('/api/org')]);
+  const go = (w, p = projectId, per = period) => { location.hash = `#/weekly?${new URLSearchParams({ period: per, ...(w ? { week: w } : {}), ...(p ? { project: p } : {}) })}`; };
+  const shift = (n) => (monthly ? shiftMonth(r.week_start, n) : shiftWeek(r.week_start, n));
+  const unit = monthly ? 'month' : 'week';
+  const periodSwitch = el('div', { class: 'seg', role: 'tablist', 'aria-label': 'Report period' },
+    ['week', 'month'].map((p) => el('button', { type: 'button', role: 'tab', 'aria-selected': String(p === period), class: p === period ? 'on' : '',
+      text: p === 'week' ? 'Weekly' : 'Monthly', onclick: () => { if (p !== period) go('', projectId, p); } })));
+
+  const myProjects = isAdmin() ? orgData.projects : orgData.projects.filter((p) => (state.me.pm_project_ids || []).includes(p.id));
+  const projectSel = myProjects.length > 1 ? el('select', { onchange: (e) => go(week, e.target.value), 'aria-label': 'Project' },
+    el('option', { value: '', text: isAdmin() ? 'All projects' : 'All my projects' }),
+    myProjects.map((p) => el('option', { value: String(p.id), text: p.name, selected: String(p.id) === projectId }))) : null;
+
+  const emailBtn = el('button', { type: 'button', class: 'btn btn-primary', onclick: async () => {
+    emailBtn.disabled = true;
+    try {
+      const res = await api('/api/weekly/send', { method: 'POST', body: JSON.stringify({ week: r.week_start, period, project_id: projectId ? Number(projectId) : null }) });
+      toast(res.status === 'sent' ? `Sent to ${res.to}.` : res.status === 'dry-run' ? 'Email is not set up: saved in “Emails sent” only.' : 'The email could not be sent. See “Emails sent”.');
+    } catch (e) { toast(e.message); } finally { emailBtn.disabled = false; }
+  } }, icon('mail', 16, 2), 'Email it to me');
+
+  const nav = el('div', { class: 'week-nav' },
+    el('button', { type: 'button', class: 'icon-btn', 'aria-label': `Previous ${unit}`, onclick: () => go(shift(-1)) }, icon('back', 16, 2.2)),
+    el('strong', { text: r.label }),
+    el('button', { type: 'button', class: 'icon-btn flip', 'aria-label': `Next ${unit}`, disabled: r.current, onclick: () => go(shift(1)) }, icon('back', 16, 2.2)),
+    r.current ? el('span', { class: 'status work', text: `This ${unit}` }) : el('button', { type: 'button', class: 'btn btn-sm', onclick: () => go('') }, `This ${unit}`));
+
+  const c = r.counts;
+  const tile = (n, label, tone) => el('div', { class: `wk-tile ${tone || ''}` }, el('b', { text: n }), el('span', { text: label }));
+  const taskLine = (t, { due = true, extra = null } = {}) => el('div', { class: 'list-row' },
+    el('div', { class: 'grow' },
+      el('a', { href: t.meeting_source === 'manual' ? '#/tasks?tab=send' : `#/meeting/${t.meeting_id}`, text: t.description }),
+      extra ? el('p', { class: 'small muted', style: { margin: '2px 0 0' }, text: extra }) : null),
+    el('span', { class: 'small muted', text: t.who || 'unassigned' }),
+    due && t.due_date ? el('span', { class: `small mono ${t.due_date < r.as_of ? 'late-text' : 'muted'}`, text: fmtShort(t.due_date) }) : null,
+    t.jira_key ? el('span', { class: 'jira-badge', text: t.jira_key }) : null);
+  const section = (title, rows, render, { tone = '', empty = null } = {}) => ((rows.length || empty) ? el('section', { class: `card ${tone}` },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: title }), el('span', { class: 'mono small muted', text: rows.length })),
+    rows.length ? el('div', { class: 'list' }, rows.map(render)) : el('p', { class: 'small subtle', text: empty })) : null);
+
+  const maxOpen = Math.max(1, ...r.workload.map((w) => w.open));
+  const workload = r.workload.length ? el('section', { class: 'card' },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Open work per person' })),
+    el('div', { class: 'wk-load' }, r.workload.map((w) => el('div', { class: 'wk-load-row' },
+      el('span', { class: 'who', text: w.who }),
+      el('span', { class: 'track' }, el('span', { class: 'fill', style: { width: `${(w.open / maxOpen) * 100}%` } }),
+        w.overdue ? el('span', { class: 'fill late', style: { width: `${(w.overdue / maxOpen) * 100}%` } }) : null),
+      el('span', { class: 'small mono', title: w.hours ? 'Open tickets/tasks · estimated hours · high priority · late' : null,
+        text: [String(w.open), w.hours ? `~${fmtEstimate(w.hours)}` : null, w.high ? `${w.high} high` : null,
+          w.overdue ? `${w.overdue} late` : null].filter(Boolean).join(' · ') }))))) : null;
+
+  const nothing = !c.meetings && !c.completed && !c.created && !c.overdue && !r.due_soon.length;
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('For project managers', monthly ? 'Monthly report' : 'Weekly report', ...nn(periodSwitch, projectSel, emailBtn)),
+    el('div', { class: 'row', style: { alignItems: 'center', justifyContent: 'space-between' } }, nav,
+      el('span', { class: 'small subtle', text: `Emailed automatically to each PM ${r.schedule}.${r.projects.length ? ` Projects: ${r.projects.join(', ')}.` : ''}` })),
+    el('div', { class: 'wk-tiles' },
+      tile(c.meetings, 'meetings'), tile(c.completed, 'finished', 'good'), tile(c.created, 'new'),
+      tile(c.sent, 'sent to Jira'), tile(c.overdue, 'overdue', c.overdue ? 'bad' : ''), tile(c.blocked, 'blocked', c.blocked ? 'bad' : '')),
+    r.highlights ? el('section', { class: 'card wk-highlights' }, el('span', { class: 'eyebrow accent', text: 'Highlights' }), el('p', { text: r.highlights })) : null,
+    nothing ? el('div', { class: 'empty' }, el('strong', { text: `A quiet ${unit}` }), `No meetings, finished or new work in your projects this ${unit}.`) : null,
+    el('div', { class: 'row' },
+      el('div', { class: 'col-3 stack' }, ...nn(
+        section('Overdue', r.overdue, (t) => taskLine(t), { tone: r.overdue.length ? 'wk-bad' : '' }),
+        section('Blocked', r.blocked, (t) => taskLine(t, { extra: t.note ? `${t.note} (${t.said_in})` : null })),
+        section('Due in the next 7 days', r.due_soon, (t) => taskLine(t)),
+        section(`Finished this ${unit}`, r.completed, (t) => taskLine(t, { due: false, extra: t.done_by_jira ? 'Closed in Jira' : null })),
+        section('New work', r.created, (t) => taskLine(t)))),
+      el('div', { class: 'col-2 stack' }, ...nn(
+        workload,
+        section('Decisions', r.decisions, (d) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${d.meeting_id}`, text: d.description }))),
+        section('Still open questions', r.open_questions, (q) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${q.meeting_id}`, text: q.text }))),
+        section('Meetings', r.meetings, (m) => el('div', { class: 'list-row' },
+          el('span', { class: 'small mono muted', text: fmtShort(m.meeting_date) }),
+          el('a', { class: 'grow', href: `#/meeting/${m.id}`, text: m.title }),
+          el('span', { class: 'small muted', text: `${m.tasks} task${m.tasks === 1 ? '' : 's'}` }))))))));
 }
 
 /* ---------- Meeting detail ---------- */
@@ -726,13 +956,18 @@ async function renderMeeting(id) {
   stopPolling();
   if (state.cleanup) { state.cleanup(); state.cleanup = null; }
   const [m] = await Promise.all([api(`/api/meetings/${id}`), loadOrg()]);
+  // A daily standup has its own report page; ?transcript=1 still shows the recording and transcript
+  if (m.kind === 'standup' && isManager() && !/[?&]transcript=1/.test(location.hash)) {
+    location.replace(`#/standup/${id}`);
+    return;
+  }
   const startAt = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('t')) || null;
 
   const actions = [];
   const unsent = (m.tickets || []).filter((t) => !t.jira_key && t.status !== 'done');
   // Tickets are made here (select action items) and sent from the Tickets page, never straight to Jira
   if (m.can_manage && unsent.length) {
-    actions.push(el('a', { class: 'btn btn-primary', href: `#/tickets?meeting=${m.id}` }, icon('jira', 16, 2), `Tickets to send (${unsent.length})`));
+    actions.push(el('a', { class: 'btn btn-primary', href: `#/tasks?tab=send&meeting=${m.id}` }, icon('jira', 16, 2), `Tickets to send (${unsent.length})`));
   }
   if (m.can_manage && !isBusy(m) && m.transcript && state.status.claude) {
     actions.push(el('button', { type: 'button', class: 'btn', onclick: () => {
@@ -813,8 +1048,16 @@ async function renderMeeting(id) {
 
   const transcriptCard = el('section', { class: 'card', 'aria-label': 'Transcript' },
     el('div', { class: 'card-head' }, el('h2', { text: 'Transcript' }),
-      colors.size ? el('div', { class: 'speakers' }, [...colors].map(([name, c]) => el('span', { class: 'speaker' },
-        el('span', { class: 'dot', style: { background: c } }), name))) : null),
+      (m.speakers || []).length && m.can_manage && !isBusy(m)
+        ? el('div', { class: 'speakers' }, m.speakers.map((s) => el('button', {
+          type: 'button', class: `speaker speaker-btn${s.employee_id ? ' known' : ''}`,
+          title: s.source === 'voice' ? `Recognized by voice (${Math.round(s.similarity * 100)}% similar). Click to change.`
+            : s.employee_id ? 'Named by you. Click to change.' : 'Who is this? Click to choose the person.',
+          onclick: () => speakerForm(m, s) },
+          el('span', { class: 'dot', style: { background: colors.get(s.name) || 'var(--line)' } }), s.name,
+          s.source === 'voice' ? el('span', { class: 'speaker-tag', text: 'voice' }) : null)))
+        : colors.size ? el('div', { class: 'speakers' }, [...colors].map(([name, c]) => el('span', { class: 'speaker' },
+          el('span', { class: 'dot', style: { background: c } }), name))) : null),
     rawToggle ? el('div', { class: 'chips' }, rawToggle) : null);
   const lineNodes = [];
   const canEdit = m.can_manage && !isBusy(m);
@@ -934,10 +1177,76 @@ async function renderMeeting(id) {
       : el('p', { class: 'small subtle', text: 'No action items.' }),
     picker ? picker.footer : null);
 
+  // Long-term memory: what this meeting said about work planned in earlier meetings
+  const STAGES = { done: ['Done', 'is-done'], in_progress: ['In progress', 'is-progress'], blocked: ['Blocked', 'is-blocked'], mentioned: ['Mentioned', 'is-mentioned'],
+    reopened: ['Reopened', 'is-reopened'] };
+  const setStatus = async (taskId, status) => {
+    try { await api(`/api/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }); reloadMeeting(); } catch (e) { toast(e.message); }
+  };
+  const earlierCard = (m.earlier_work || []).length ? el('section', { class: 'card' },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Earlier work' }),
+      el('span', { class: 'small subtle', text: 'from previous meetings' })),
+    el('div', { class: 'earlier-list' }, m.earlier_work.map((u) => {
+      const [label, cls] = STAGES[u.status] || STAGES.mentioned;
+      const closedHere = u.closed_task && u.task_status === 'done';
+      return el('div', { class: 'earlier' },
+        el('div', { class: 'earlier-head' },
+          el('span', { class: `stage ${cls}`, text: label }),
+          el('b', { class: 'grow', text: u.description }),
+          u.jira_key ? el('a', { class: 'jira-link', href: u.jira_url, target: '_blank', rel: 'noopener', text: u.jira_key }) : null),
+        el('p', { class: 'small subtle' }, u.who ? `${u.who} · from ` : 'From ',
+          el('a', { href: `#/meeting/${u.from_meeting_id}`, text: `${u.from_title} (${fmtShort(u.from_date)})` })),
+        u.note ? el('p', { class: 'small', text: u.note }) : null,
+        quote(u.quote, lines, player),
+        m.can_manage ? el('div', { class: 'earlier-actions' },
+          closedHere ? el('span', { class: 'small subtle', text: 'Closed automatically from this meeting.' }) : null,
+          u.status === 'reopened' && u.task_status === 'open'
+            ? el('span', { class: 'small subtle', text: `Reopened from this meeting instead of a new ticket${u.jira_key ? ' (in Jira too)' : ''}.` }) : null,
+          u.task_status === 'done'
+            ? el('button', { type: 'button', class: 'btn btn-sm', onclick: () => setStatus(u.task_id, 'open') }, icon('retry', 14, 2), 'Reopen')
+            : el('button', { type: 'button', class: 'btn btn-sm', onclick: () => setStatus(u.task_id, 'done') }, icon('tick', 14, 2.4), 'Mark done')) : null);
+    }))) : null;
+
+  // Discussed, but nobody was given it: shown first so the PM doesn't miss it
+  const loose = m.unowned || [];
+  const openLoose = loose.filter((u) => u.status === 'open');
+  const noOwnerTasks = (m.tasks || []).filter((t) => t.status === 'open' && !t.jira_key && !t.merged_into
+    && !t.assignee_id && !t.assignee_email && (!t.assignee || /^(folësi|folesi|speaker)\b/i.test(t.assignee.trim())));
+  const handled = loose.filter((u) => u.status !== 'open');
+  const unownedCard = isManager() && (loose.length || noOwnerTasks.length) ? el('section', { class: `card stack${openLoose.length || noOwnerTasks.length ? ' card-warn' : ''}` },
+    el('div', { class: 'card-head' }, cardTitle('alert', 'Without an owner', 'yellow'),
+      el('span', { class: 'mono small muted', text: openLoose.length + noOwnerTasks.length })),
+    openLoose.length || noOwnerTasks.length
+      ? notice('warn', 'alert', 'Discussed in this meeting, but nobody was given it. Give each one to someone so it isn’t forgotten. It stays on ',
+        el('a', { href: '#/owners', text: 'Needs an owner' }), ' until then.')
+      : el('p', { class: 'small subtle', text: 'Everything discussed here has an owner now.' }),
+    openLoose.map((u) => (m.can_manage ? unownedItem(u, reloadMeeting, { showMeeting: false })
+      : el('div', { class: 'unowned' }, el('div', { class: 'unowned-head' }, icon('alert', 16, 2), el('b', { text: u.description }))))),
+    noOwnerTasks.length ? el('p', { class: 'small' }, icon('user', 14, 2),
+      ` ${noOwnerTasks.length} action item${noOwnerTasks.length === 1 ? ' has' : 's have'} no assignee: `,
+      noOwnerTasks.map((t) => t.description).join(' · '), '. Choose who does it under “Action items”.') : null,
+    handled.length ? el('details', { class: 'sources' },
+      el('summary', { text: `Handled (${handled.length})` }),
+      el('ul', {}, handled.map((u) => el('li', {},
+        el('span', { text: u.description }),
+        el('span', { class: 'small subtle', text: u.status === 'assigned'
+          ? ` — given to ${u.assignee_name || 'someone'}${u.jira_key ? ` (${u.jira_key})` : ''}${u.resolved_note ? ` · ${u.resolved_note}` : ''}`
+          : ` — not needed${u.resolved_note ? `: ${u.resolved_note}` : ''}` }),
+        u.status === 'dismissed' && m.can_manage ? el('button', { type: 'button', class: 'btn btn-sm', style: { marginLeft: '8px' }, onclick: async () => {
+          try { await api(`/api/owners/${u.id}/restore`, { method: 'POST' }); refreshOpenCount(); reloadMeeting(); } catch (e) { toast(e.message); }
+        } }, 'Restore') : null)))) : null) : null;
+
   if (m.summary !== null && m.summary !== undefined) {
     side.append(...nn(
+      unownedCard,
       el('section', { class: 'card' }, el('span', { class: 'eyebrow', text: 'Summary' }), el('p', { class: 'summary', text: m.summary })),
-      tasksCard,
+      // Everything that was talked about, topic by topic: most of a meeting is discussion, not tasks
+      (m.topics || []).length ? el('section', { class: 'card' },
+        el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'What was discussed' }),
+          el('span', { class: 'mono small muted', text: m.topics.length })),
+        el('ol', { class: 'topics' }, m.topics.map((tp) => el('li', {}, el('b', { text: tp.title }), el('p', { class: 'small muted', text: tp.summary }))))) : null,
+      earlierCard,
+      isManager() && m.kind !== 'standup' ? tasksCard : null,  // a standup never has tasks
       // Work people reported as finished: shown for context, never turned into tickets
       (m.completed || []).length ? el('section', { class: 'card' },
         el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Already done' }),
@@ -953,7 +1262,7 @@ async function renderMeeting(id) {
   } else if (m.transcript) {
     side.append(el('section', { class: 'card' }, el('span', { class: 'eyebrow', text: 'Analysis' }),
       el('div', { class: 'empty' }, el('strong', { text: 'No summary yet' }), 'Decisions and tasks appear here once the AI analyzes the transcript.')));
-    if (m.can_manage && !isBusy(m)) side.append(tasksCard);  // the PM can still add tasks by hand
+    if (m.can_manage && !isBusy(m) && m.kind !== 'standup') side.append(tasksCard);  // the PM can still add tasks by hand
   }
 
   page.append(el('div', { class: 'row' }, el('div', { class: 'col-3 stack' }, transcriptCard), side));
@@ -1146,6 +1455,17 @@ function employeeForm(emp, reload) {
   const aliases = el('input', { type: 'text', value: e.aliases || '', maxlength: '300', placeholder: 'e.g. Ari, A.K.' });
   const active = el('input', { type: 'checkbox', checked: e.active });
   const groups = groupTree(e.team_ids, e.project_ids);
+  // Voice recognition is biometric data: only with the person's own agreement
+  const consent = el('input', { type: 'checkbox', checked: !!e.voice_consent_at });
+  const voiceInfo = !emp ? null : e.voice_samples
+    ? el('span', { class: 'small subtle' }, `Voice profile learned from ${e.voice_samples} meeting${e.voice_samples === 1 ? '' : 's'}. `,
+      el('button', { type: 'button', class: 'btn btn-sm', onclick: async (ev) => {
+        if (!confirm(`Delete ${e.full_name}’s voice profile? They are no longer recognized by voice until it is learned again.`)) return;
+        try { await api(`/api/employees/${emp.id}/voice`, { method: 'DELETE' }); ev.target.closest('span').textContent = 'Voice profile deleted.'; toast('Voice profile deleted.'); reload(); }
+        catch (err) { toast(err.message); }
+      } }, 'Delete voice profile'))
+    : el('span', { class: 'small subtle', text: e.voice_consent_at ? 'No voice yet: add a voice sample below, or name them once in a meeting’s transcript.' : '' });
+  const sample = emp && e.voice_consent_at ? voiceSampleBox(emp, reload) : null;
   openForm(emp ? 'Edit employee' : 'New employee', [
     el('div', { class: 'field-grid' },
       field('Full name', name),
@@ -1154,11 +1474,16 @@ function employeeForm(emp, reload) {
       field('Nicknames', aliases, { hint: 'What people call them in meetings, comma separated. Helps assign tasks to the right person.' }),
       field('Teams and projects', groups, { hint: 'Choosing a project also adds the person to its team.' }),
       el('label', { class: 'check-inline field-wide' }, active, 'Active (takes part in meetings)'),
+      el('div', { class: 'field field-wide' },
+        el('label', { class: 'check-inline' }, consent, 'Agreed to be recognized by voice'),
+        el('small', { text: 'Tick only after the person agreed (ideally in writing). The app then keeps a voice fingerprint (numbers, not a recording) on this computer. Unticking deletes it.' }),
+        voiceInfo, sample),
       ),
   ], {
     onSave: async () => {
+      if (emp && e.voice_consent_at && !consent.checked && !confirm(`Withdraw ${e.full_name}’s voice consent? Their voice profile is deleted.`)) throw new Error('Not saved.');
       const body = JSON.stringify({ full_name: name.value, email: email.value, role: role.value, aliases: aliases.value,
-        active: active.checked, team_ids: groups.teamIds(), project_ids: groups.projectIds() });
+        active: active.checked, team_ids: groups.teamIds(), project_ids: groups.projectIds(), voice_consent: consent.checked });
       await api(emp ? `/api/employees/${emp.id}` : '/api/employees', { method: emp ? 'PUT' : 'POST', body });
       toast(emp ? 'Changes saved.' : 'Employee added.');
       reload();
@@ -1170,6 +1495,53 @@ function employeeForm(emp, reload) {
       reload();
     } : null,
   });
+}
+
+/** Record (or upload) 20-60 s of the person speaking alone, so their name shows from the first meeting. */
+function voiceSampleBox(emp, reload) {
+  const status = el('span', { class: 'small subtle' });
+  const recBtn = el('button', { type: 'button', class: 'btn btn-sm' }, 'Record voice sample');
+  const fileIn = el('input', { type: 'file', accept: 'audio/*,.mp3,.wav,.m4a,.webm,.ogg,.flac,.aac', style: { display: 'none' } });
+  const upBtn = el('button', { type: 'button', class: 'btn btn-sm', onclick: () => fileIn.click() }, 'Upload a recording');
+  let r = null;
+  const send = async (blob, name) => {
+    recBtn.disabled = upBtn.disabled = true;
+    status.textContent = 'Learning the voice… this can take a minute.';
+    try {
+      const fd = new FormData();
+      fd.append('file', blob, name);
+      const res = await api(`/api/employees/${emp.id}/voice`, { method: 'POST', body: fd });
+      status.textContent = `Voice learned from ${res.seconds} s of speech. ${emp.full_name}’s name now shows automatically in new meetings.`;
+      toast('Voice sample saved.');
+      reload();
+    } catch (err) { status.textContent = err.message; }
+    finally { recBtn.disabled = upBtn.disabled = false; }
+  };
+  fileIn.addEventListener('change', () => fileIn.files[0] && send(fileIn.files[0], fileIn.files[0].name));
+  recBtn.addEventListener('click', async () => {
+    if (r) { r.recorder.stop(); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch { status.textContent = 'Microphone access was denied. Allow it in the browser, or upload a recording.'; return; }
+    const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    r = { recorder: new MediaRecorder(stream, type ? { mimeType: type } : undefined), chunks: [], started: Date.now() };
+    r.recorder.ondataavailable = (ev) => ev.data.size && r.chunks.push(ev.data);
+    r.recorder.onstop = () => {
+      clearInterval(r.timer);
+      stream.getTracks().forEach((t) => t.stop());
+      const secs = (Date.now() - r.started) / 1000, chunks = r.chunks, mime = r.recorder.mimeType;
+      r = null;
+      recBtn.textContent = 'Record voice sample';
+      if (secs < 12) { status.textContent = 'Too short: record at least 20–30 seconds.'; return; }
+      send(new Blob(chunks, { type: mime }), `sample.${(mime || '').includes('ogg') ? 'ogg' : 'webm'}`);
+    };
+    r.recorder.start(1000);
+    recBtn.textContent = 'Stop';
+    r.timer = setInterval(() => { status.textContent = `Recording… ${fmtClock((Date.now() - r.started) / 1000)}. Ask ${emp.full_name} to talk normally about their work for 30 seconds, alone.`; }, 500);
+  });
+  return el('div', { class: 'voice-sample' },
+    el('small', { text: `Voice sample: ${emp.full_name} talks alone for 20–60 seconds (about their work, in their usual voice). Then their name shows in transcripts from the first meeting. The recording itself is deleted right after; only the fingerprint is kept.` }),
+    el('div', { class: 'row' }, recBtn, upBtn, fileIn), status);
 }
 
 /** kind = 'team' | 'project'. For a new project, `presetTeamId` picks its team. */
@@ -1401,8 +1773,8 @@ function taskPicker(reload) {
         el('h3', { class: 'ticket-title', text: r.ticket.description }),
         r.ticket.details ? el('p', { class: 'small muted', style: { whiteSpace: 'pre-line' }, text: r.ticket.details }) : null,
         r.ai ? null : el('p', { class: 'small subtle', text: 'Written from the task text (no AI key).' }),
-        el('p', { class: 'small subtle', text: 'Next: on the Tickets page choose who gets it and send it to Jira.' }),
-      ), { saveText: 'Go to Tickets', onSave: async () => { location.hash = '#/tickets'; } });
+        el('p', { class: 'small subtle', text: 'Next: in “Tickets to send” choose who gets it and send it to Jira.' }),
+      ), { saveText: 'Go to Tickets to send', onSave: async () => { location.hash = '#/tasks?tab=send'; } });
     } catch (e) { toast(e.message); paintFooter(); }
   }
   function paintFooter() {
@@ -1440,12 +1812,16 @@ async function ticketEditForm(targetId, quoteTasks, reload) {
   const jiraKey = el('input', { type: 'text', value: t.jira_project || '', maxlength: '10', placeholder: t.ticket_project || state.status.jira_default || 'e.g. PAY',
     style: { textTransform: 'uppercase' } });
   const quotes = quoteTasks.filter((x) => x.quote);
+  const prio = priorityInput(t.priority);
+  const est = estimateInput(t.estimate_hours);
   openForm(isTicket ? 'Edit ticket' : 'Edit task', nn(
     el('div', { class: 'field-grid' },
-      field(isTicket ? 'Ticket title' : 'Task', title),
-      field('Details', details),
+      field('Project key', jiraKey, { hint: t.ticket_project && !t.jira_project ? `Empty = ${t.ticket_project} (from the project)` : 'Empty = the meeting’s project' }),
+      field('Summary', title),
+      field('Description', details),
+      field('Priority', prio, { wide: false, hint: t.priority_reason ? `AI: ${t.priority_reason}` : null }),
       field('Due date', due, { wide: false, hint: t.due_date_text ? `Said in the meeting: “${t.due_date_text}”` : null }),
-      field('Jira project', jiraKey, { wide: false, hint: t.ticket_project && !t.jira_project ? `Empty = ${t.ticket_project} (from the project)` : 'Empty = the meeting’s project' })),
+      field('Original estimate', est, { wide: false, hint: 'Jira format: 1w = 5d, 1d = 8h' })),
     quotes.length ? el('div', { class: 'stack', style: { gap: '6px' } },
       el('span', { class: 'small', style: { fontWeight: '700' }, text: quotes.length > 1 ? 'What was said (Albanian)' : 'What was said (Albanian)' }),
       el('small', { class: 'subtle', text: 'Double-click a quote (or right-click twice) to fix misheard words. Fixes are learned in Vocabulary and fixed in the transcript too.' }),
@@ -1454,7 +1830,8 @@ async function ticketEditForm(targetId, quoteTasks, reload) {
     saveText: 'Save',
     onSave: async () => {
       await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: JSON.stringify({
-        description: title.value, details: details.value, jira_project: jiraKey.value, due_date: due.value || null, set_due_date: true }) });
+        description: title.value, details: details.value, jira_project: jiraKey.value, due_date: due.value || null, set_due_date: true,
+        ...planBody(prio, est) }) });
       toast(isTicket ? 'Ticket saved.' : 'Task saved.');
       await reload();
     },
@@ -1511,19 +1888,102 @@ function editableQuote(taskId, text, onSaved) {
   return p;
 }
 
-async function renderTickets() {
+/** A ticket written by hand, without a meeting. It waits in "To send" like the others. */
+function newTicketForm(onCreated) {
+  const projects = isAdmin() ? state.org.projects : state.org.projects.filter((p) => state.me.pm_project_ids.includes(p.id));
+  const people = state.org.employees.filter((e) => e.email && e.active);
+  const title = el('input', { type: 'text', required: true, maxlength: '250', placeholder: 'e.g. Fix the login page on mobile' });
+  const details = el('textarea', { rows: '5', maxlength: '4000', placeholder: 'What has to be done, and when is it finished?\n\nScope: …\nDone when: …' });
+  const person = el('select', {},
+    el('option', { value: '', text: '— Choose later —' }),
+    people.map((e) => el('option', { value: String(e.id), text: `${e.full_name} — ${e.email}` })),
+    el('option', { value: '__other', text: 'Other email…' }));
+  const other = el('input', { type: 'email', placeholder: 'name@anchorzup.com', hidden: true, autocomplete: 'off', 'aria-label': 'Other email' });
+  const sendNow = el('input', { type: 'checkbox', checked: true });
+  const sendLine = el('label', { class: 'check-inline field-wide', hidden: true }, sendNow,
+    'Send to Jira now (the person also gets an email)');
+  const paintSend = () => {
+    const chosen = person.value && (person.value !== '__other' || other.value.trim());
+    sendLine.hidden = !state.status.jira || !chosen;
+    formEl.querySelector('button[type=submit]').textContent = !sendLine.hidden && sendNow.checked ? 'Create and send' : 'Create ticket';
+  };
+  person.addEventListener('change', () => { other.hidden = person.value !== '__other'; if (!other.hidden) other.focus(); paintSend(); });
+  other.addEventListener('input', paintSend);
+  sendNow.addEventListener('change', paintSend);
+  const due = el('input', { type: 'date' });
+  const project = el('select', {},
+    isAdmin() ? el('option', { value: '', text: '— No project —' }) : null,
+    projects.map((p) => el('option', { value: String(p.id), text: p.name + (p.jira_key ? ` · ${p.jira_key}` : '') })));
+  const jiraKey = el('input', { type: 'text', maxlength: '10', placeholder: state.status.jira_default || 'e.g. KAN', style: { textTransform: 'uppercase' } });
+  const ai = state.status.claude;
+  const prio = priorityInput(null, ai ? 'Let the AI choose' : '— Not set —');
+  openForm('New ticket', [
+    field('Project', project, { wide: false }),
+    field('Project key', jiraKey, { wide: false, hint: 'Empty = the project’s Jira key, or the default.' }),
+    field('Summary', title),
+    field('Description', details, { hint: 'Optional. Written as it will appear in Jira.' }),
+    el('label', { class: 'field field-wide' }, 'Assignee', person, other),
+    field('Priority', prio, { wide: false }),
+    field('Due date', due, { wide: false }),
+    sendLine,
+  ], {
+    saveText: 'Create ticket',
+    onSave: async () => {
+      const body = {
+        title: title.value, details: details.value || null, due_date: due.value || null,
+        project_id: project.value ? Number(project.value) : null, jira_project: jiraKey.value || null,
+        assignee_id: person.value && person.value !== '__other' ? Number(person.value) : null,
+        assignee_email: person.value === '__other' ? other.value : null,
+        priority: prio.value || null,
+      };
+      let res = await api('/api/tickets/manual', { method: 'POST', body: JSON.stringify(body) });
+      if (res.duplicate) {
+        const d = res.duplicate;
+        const what = [d.is_ticket ? 'ticket' : 'task', d.jira_key, d.who].filter(Boolean).join(' · ');
+        if (!confirm(`This looks like work that is already open:\n\n“${d.description}” (${what})\n\nCreate a new ticket anyway?`)) {
+          throw new Error('Not created: the same work is already open.');
+        }
+        res = await api('/api/tickets/manual', { method: 'POST', body: JSON.stringify({ ...body, force: true }) });
+      }
+      if (res.reopen) {
+        // The same work was finished before as a ticket: reopen that one (in Jira too) instead of a copy
+        const d = res.reopen;
+        const what = [d.jira_key, d.who].filter(Boolean).join(' · ');
+        if (confirm(`This work was already done as a ticket:\n\n“${d.description}”${what ? ` (${what})` : ''}\n\nReopen that ticket instead of creating a new one?`)) {
+          const r = await api(`/api/tickets/${d.id}/reopen`, { method: 'POST' });
+          toast(r.jira_error ? `Reopened here, but not in Jira: ${r.jira_error}`
+            : `Ticket reopened${d.jira_key ? ` (${d.jira_key}, in Jira too)` : ''}.`);
+          await onCreated();
+          return;
+        }
+        if (!confirm('Create a new ticket anyway?')) throw new Error('Not created.');
+        res = await api('/api/tickets/manual', { method: 'POST', body: JSON.stringify({ ...body, force: true }) });
+      }
+      const { ticket } = res;
+      if (sendNow.checked && ticket.recipient_email) {
+        const r = await api('/api/tickets/send', { method: 'POST', body: JSON.stringify({ task_ids: [ticket.id] }) });
+        if (r.created.length) toast(`Sent to Jira: ${r.created[0]} · email to ${ticket.recipient_email}`);
+        else toast(`Ticket created, but not sent: ${Object.values(r.errors)[0] || 'unknown error'}`);
+      } else {
+        toast(ticket.recipient_email ? 'Ticket created. Send it from “To send”.' : 'Ticket created. Choose who gets it, then send it.');
+      }
+      await onCreated();
+    },
+  });
+}
+
+/** The tickets part of the Tasks page: tab "send" (before Jira) or "sent". */
+async function renderTickets(host, tab, recount) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
-  let meetingFilter = Number(params.get('meeting')) || null;
+  const meetingFilter = Number(params.get('meeting')) || null;
   let [all] = await Promise.all([api('/api/tickets'), loadOrg()]);
   const stageOf = (t) => (t.jira_key ? 'sent' : 'send');
-  let tab = params.get('tab') === 'sent' ? 'sent' : 'send';
   const selected = new Set();
   const errors = {};
-  const tabsBar = el('div', { class: 'filter', role: 'tablist', 'aria-label': 'Tickets' });
   const listSlot = el('div', { class: 'stack' });
   const footer = el('div', { class: 'ticket-footer', hidden: true });
 
-  const reload = async () => { all = await api('/api/tickets'); refreshOpenCount(); paint(); };
+  const reload = async () => { all = await api('/api/tickets'); recount(); paint(); };
   const base = () => all.filter((t) => (!meetingFilter || t.meeting_id === meetingFilter) && (t.status !== 'done' || t.jira_key));
   const visible = () => base().filter((t) => stageOf(t) === tab);
 
@@ -1547,9 +2007,11 @@ async function renderTickets() {
         onchange: (e) => { e.target.checked ? selected.add(t.id) : selected.delete(t.id); paintFooter(); },
       }) : null,
       el('div', { class: 'grow' },
-        el('a', { class: 'small', href: `#/meeting/${t.meeting_id}`, text: `${t.meeting_title} · ${fmtShort(t.meeting_date)}` }),
+        t.meeting_source === 'manual'
+          ? el('span', { class: 'small subtle' }, icon('edit', 13, 2), ` Written by hand · ${fmtShort(t.created_at.slice(0, 10))}`)
+          : el('a', { class: 'small', href: `#/meeting/${t.meeting_id}`, text: `${t.meeting_title} · ${fmtShort(t.meeting_date)}` }),
         t.project_name ? el('span', { class: 'tag-project', text: t.project_name }) : null),
-      stage === 'sent' ? el('a', { class: 'jira-link', href: t.jira_url, target: '_blank', rel: 'noopener', text: t.jira_key }) : null);
+      stage === 'sent' ? el('a', { class: 'jira-link', href: t.jira_url, target: '_blank', rel: 'noopener', text: t.jira_key + (t.jira_status ? ` · ${t.jira_status}` : '') }) : null);
 
     const sources = (t.sources || []).length > 1 ? el('details', { class: 'sources' },
       el('summary', { text: `Made from ${t.sources.length} tasks` }),
@@ -1559,6 +2021,8 @@ async function renderTickets() {
       t.details ? el('p', { class: 'small muted', style: { whiteSpace: 'pre-line' }, text: t.details }) : null,
       t.quote ? (stage === 'sent' ? el('p', { class: 'quote', text: `“${t.quote}”` }) : editableQuote(t.id, t.quote, reload)) : null,
       sources,
+      t.priority || t.estimate_hours ? el('div', { class: 'meta' }, planPills(t, { estimate: true }),
+        t.priority_reason ? el('span', { class: 'small subtle', text: t.priority_reason }) : null) : null,
       el('p', { class: 'small subtle', text: [
         t.due_date ? `Due: ${t.due_date}` : 'No due date',
         `Jira project: ${t.jira_project || t.ticket_project || state.status.jira_default || '—'}`,
@@ -1598,13 +2062,14 @@ async function renderTickets() {
     }, icon('jira', 14, 2.2), 'Send to Jira');
 
     return el('article', { class: 'card ticket' }, head, ...body,
-      el('label', { class: 'field recipient' }, 'Send to', person, other),
+      el('label', { class: 'field recipient' }, 'Assignee', person, other),
       el('p', { class: 'small subtle', text: t.recipient_email
         ? `The Jira ticket is assigned to ${t.recipient_email} and the email goes there.`
         : `Choose who gets this ticket. The list has the people with an email on Settings → Team.` }),
       errors[t.id] ? el('p', { class: 'jira-error', text: errors[t.id] }) : (t.jira_error ? el('p', { class: 'jira-error', text: `Jira: ${t.jira_error}` }) : null),
       el('div', { class: 'ticket-actions' },
-        el('a', { class: 'btn btn-sm', href: `#/tasks?edit=${t.id}`, title: 'Change the title, details, due date or quote' }, icon('edit', 14, 2), 'Edit'),
+        el('button', { type: 'button', class: 'btn btn-sm', title: 'Change the title, details, due date or quote',
+          onclick: () => ticketEditForm(t.id, [t, ...(t.sources || [])], reload).catch((e) => toast(e.message)) }, icon('edit', 14, 2), 'Edit'),
         el('span', { class: 'spacer' }),
         sendBtn));
   }
@@ -1632,30 +2097,25 @@ async function renderTickets() {
   }
 
   function paint() {
-    const count = (k) => base().filter((t) => stageOf(t) === k).length;
-    tabsBar.replaceChildren(...[['send', 'To send'], ['sent', 'Sent']].map(([k, label]) => el('button', {
-      type: 'button', role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k),
-      text: `${label} ${count(k)}`, onclick: () => { tab = k; paint(); },
-    })));
     const shown = visible();
     listSlot.replaceChildren(...nn(
       tab === 'send' && !state.status.jira ? notice('warn', 'jira', el('strong', { text: 'Jira is not configured. ' }),
         'Fill in JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN in .env (or JIRA_MOCK=1 for testing) and restart the server.') : null,
       shown.length ? shown.map(ticketCard)
         : el('section', { class: 'card' }, el('div', { class: 'empty' },
-          tab === 'send' ? [el('strong', { text: 'No tickets to send' }), el('span', {}, 'Make tickets by ticking action items in a meeting or on the ', el('a', { href: '#/tasks', text: 'Tasks page' }), '.')]
+          tab === 'send' ? [el('strong', { text: 'No tickets to send' }), el('span', {}, 'Write one with “New ticket”, or tick action items in a meeting or in the ', el('a', { href: '#/tasks', text: 'Tasks tab' }), '.')]
             : [el('strong', { text: 'No tickets sent yet' }), 'Tickets sent to Jira appear here with their link.']))));
     paintFooter();
   }
 
   const meeting = meetingFilter && all.find((t) => t.meeting_id === meetingFilter);
   paint();
-  view.replaceChildren(el('div', { class: 'page' },
-    pageHead('Before they go to Jira', 'Tickets'),
-    el('p', { class: 'muted', text: 'Choose who gets each ticket and send it. Nothing goes to Jira unless you send it.' }),
-    el('div', { class: 'card-head' }, tabsBar,
-      meeting ? el('button', { type: 'button', class: 'chip active', title: 'Clear filter', onclick: () => { meetingFilter = null; location.hash = '#/tickets'; } },
-        `Only: ${meeting.meeting_title}`, icon('x', 14, 2.2)) : null),
+  host.replaceChildren(...nn(
+    el('p', { class: 'muted', text: tab === 'send'
+      ? 'Choose who gets each ticket and send it. Nothing goes to Jira unless you send it.'
+      : 'Tickets already in Jira. Their status is read back from Jira.' }),
+    meeting ? el('div', { class: 'chips' }, el('button', { type: 'button', class: 'chip active', title: 'Clear filter',
+      onclick: () => { location.hash = `#/tasks?tab=${tab}`; } }, `Only: ${meeting.meeting_title}`, icon('x', 14, 2.2))) : null,
     listSlot,
     footer));
 }
@@ -1701,12 +2161,221 @@ async function renderVocabulary() {
         : el('p', { class: 'small subtle', text: 'The file is empty.' }))));
 }
 
+/** Who is "Folësi 2"? The PM picks the person; if they agreed, their voice is learned. */
+function speakerForm(m, s) {
+  const people = state.org.employees.filter((e) => e.active);
+  const sel = el('select', { required: false },
+    el('option', { value: '', text: `— Unknown (${s.label}) —` }),
+    people.map((e) => el('option', { value: String(e.id), selected: e.id === s.employee_id,
+      text: e.full_name + (isAdmin() ? (e.voice_consent_at ? ' · voice ✓' : ' · no voice consent') : '') })));
+  const hint = el('p', { class: 'small subtle' });
+  const paint = () => {
+    const e = people.find((x) => String(x.id) === sel.value);
+    hint.textContent = !e ? 'The speaker stays unnamed.'
+      : e.voice_consent_at ? `${e.full_name}’s voice is learned from this meeting, so next time they are recognized automatically.`
+        : `Only the name is set. ${e.full_name} hasn’t agreed to voice recognition, so the voice is not saved (Settings → Team).`;
+  };
+  sel.addEventListener('change', paint);
+  paint();
+  openForm(`Who is ${s.label}?`, [
+    el('p', { class: 'small muted', text: 'Listen to a few of their lines in the transcript, then choose the person. Their tasks from this meeting move to them too.' }),
+    field('Person', sel), hint,
+  ], {
+    saveText: 'Save',
+    onSave: async () => {
+      const r = await api(`/api/meetings/${m.id}/speakers/${encodeURIComponent(s.label)}`, { method: 'PUT',
+        body: JSON.stringify({ employee_id: sel.value ? Number(sel.value) : null }) });
+      toast(r.learned ? `${s.label} is ${r.name}. Voice learned: next time it’s automatic. Use “Analyze again” so the AI uses the name.`
+        : `${s.label} is ${r.name}.`);
+      await renderMeeting(m.id);
+    },
+  });
+}
+
+/* ================= Daily standups (a report, never tasks or tickets) ================= */
+
+const STANDUP_STATUS = { on_track: ['On track', 'is-done'], at_risk: ['At risk', 'is-progress'], blocked: ['Blocked', 'is-blocked'] };
+
+function standupStatus(status, reason) {
+  const [label, cls] = STANDUP_STATUS[status] || STANDUP_STATUS.on_track;
+  return el('span', { class: `stage ${cls}`, text: label, title: reason || null });
+}
+
+function standupButtons() {
+  return [
+    el('button', { type: 'button', class: 'btn', onclick: () => openUpload('file', 'standup') }, icon('upload', 16, 2), 'Upload'),
+    el('button', { type: 'button', class: 'btn btn-primary', onclick: () => openUpload('record', 'standup') }, el('span', { class: 'rec-dot' }), 'Record standup'),
+  ];
+}
+
+/** One person's update: done / today / blockers / carried over. */
+function standupLists(u) {
+  const list = (title, items, iconName, cls) => (items.length ? el('div', { class: `su-list ${cls}` },
+    el('span', { class: 'su-label' }, icon(iconName, 14, 2.2), title),
+    el('ul', {}, items.map((x) => el('li', { text: x })))) : null);
+  return nn(
+    list('Done', u.done, 'tick', 'su-done'),
+    list('Today', u.today, 'arrow', 'su-today'),
+    list('Blocked by', u.blockers, 'alert', 'su-block'),
+    list('Carried over from the last standup', u.carried_over, 'retry', 'su-carry'));
+}
+
+async function renderStandups() {
+  const [list, people] = await Promise.all([api('/api/standups'), api('/api/standups/people?days=14')]);
+  let tab = 'people';
+  const tabsBar = el('div', { class: 'filter', role: 'tablist', 'aria-label': 'Standup report' });
+  const slot = el('div', { class: 'stack' });
+
+  const personCard = (p) => {
+    const latest = p.entries[0];
+    const days = p.entries.slice(0, 10).reverse();
+    return el('article', { class: 'card su-person' },
+      el('div', { class: 'su-head' },
+        el('h3', { class: 'grow', text: p.name }),
+        standupStatus(p.status, latest.status_reason)),
+      el('div', { class: 'su-dots', 'aria-label': 'Last standups, oldest to newest' },
+        days.map((e) => el('a', { href: `#/standup/${e.meeting_id}`, class: `su-dot ${(STANDUP_STATUS[e.status] || [])[1] || ''}`,
+          title: `${e.meeting_date}: ${(STANDUP_STATUS[e.status] || ['?'])[0]}${e.status_reason ? ` — ${e.status_reason}` : ''}` })),
+        el('span', { class: 'small subtle', text: `last ${days.length} standup${days.length === 1 ? '' : 's'}` })),
+      p.carried_streak >= 2 ? notice('warn', 'retry', `The same work was carried over ${p.carried_streak} standups in a row.`) : null,
+      el('p', { class: 'small subtle', text: `Latest: ${fmtShort(latest.meeting_date)}${latest.status_reason ? ` · ${latest.status_reason}` : ''}` }),
+      ...standupLists(latest),
+      p.entries.length > 1 ? el('details', { class: 'sources' },
+        el('summary', { text: `Earlier standups (${p.entries.length - 1})` }),
+        el('div', { class: 'stack', style: { gap: '10px', marginTop: '8px' } }, p.entries.slice(1).map((e) => el('div', { class: 'su-past' },
+          el('div', { class: 'su-head' }, el('a', { href: `#/standup/${e.meeting_id}`, text: fmtShort(e.meeting_date) }), standupStatus(e.status, e.status_reason)),
+          ...standupLists(e))))) : null);
+  };
+
+  const dayRow = (s) => {
+    const busy = isBusy(s);
+    return el('a', { class: 'meeting-row', href: `#/standup/${s.id}` },
+      el('span', { class: 'badge' }, icon('clock', 18, 2)),
+      el('div', { class: 'grow' },
+        el('b', { text: s.title }),
+        el('div', { class: 'small subtle', text: [fmtShort(s.meeting_date), s.project_name || s.team_name,
+          s.status === 'done' ? `${s.people} ${s.people === 1 ? 'person' : 'people'}` : null].filter(Boolean).join(' · ') })),
+      busy ? el('span', { class: 'pill soon', text: 'Processing…' }) : s.status === 'error' ? el('span', { class: 'pill late', text: 'Error' }) : null,
+      s.blocked ? el('span', { class: 'stage is-blocked', text: `${s.blocked} blocked` }) : null,
+      s.at_risk ? el('span', { class: 'stage is-progress', text: `${s.at_risk} at risk` }) : null);
+  };
+
+  const paint = () => {
+    tabsBar.replaceChildren(...[['people', 'By person'], ['days', 'By day']].map(([k, label]) => el('button', {
+      type: 'button', role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k), text: label,
+      onclick: () => { tab = k; paint(); } })));
+    if (tab === 'people') {
+      slot.replaceChildren(people.length
+        ? el('div', { class: 'su-grid' }, people.map(personCard))
+        : el('section', { class: 'card' }, el('div', { class: 'empty' }, el('strong', { text: 'No standups in the last 2 weeks' }),
+          'Record or upload a daily standup: each person’s update shows here, with how their work is going.')));
+    } else {
+      slot.replaceChildren(el('section', { class: 'card', style: { gap: '4px' } }, list.length ? list.map(dayRow)
+        : el('div', { class: 'empty' }, el('strong', { text: 'No standups yet' }), 'Record the first one with “Record standup”.')));
+    }
+  };
+  paint();
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('A report, not tickets', 'Daily standups', ...standupButtons()),
+    el('p', { class: 'muted', text: 'What everyone is working on and how their work is going. Nothing said in a standup becomes a task or a ticket. People with a problem are shown first.' }),
+    tabsBar, slot));
+  if (list.some(isBusy)) {
+    poll(async () => { const l = await api('/api/standups'); if (!l.some(isBusy)) { stopPolling(); route(); } });
+  }
+}
+
+async function renderStandup(id) {
+  const s = await api(`/api/standups/${id}`);
+  const busy = isBusy(s);
+  const counts = Object.fromEntries(Object.keys(STANDUP_STATUS).map((k) => [k, s.updates.filter((u) => u.status === k).length]));
+  const retry = s.can_manage && s.status === 'error' ? el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
+    try { await api(`/api/meetings/${id}/retry`, { method: 'POST' }); route(); } catch (e) { toast(e.message); }
+  } }, icon('retry', 14, 2), 'Try again') : null;
+  view.replaceChildren(el('div', { class: 'page' },
+    el('a', { href: '#/standups', class: 'small' }, icon('back', 14, 2), ' Daily standups'),
+    pageHead([fmtLong(s.meeting_date), s.project_name || s.team_name].filter(Boolean).join(' · '), s.title,
+      el('a', { class: 'btn', href: `#/meeting/${id}?transcript=1` }, icon('file', 16, 2), 'Recording & transcript')),
+    busy ? el('section', { class: 'card' }, el('div', { class: 'thinking' }, el('span', { class: 'spinner' }), s.note || 'Processing…')) : null,
+    s.status === 'error' ? notice('error', 'alert', s.error || 'Processing failed.', ' ', retry) : null,
+    s.status === 'needs_key' ? notice('warn', 'key', s.note || 'Add an AI key to write the report.') : null,
+    s.summary ? el('section', { class: 'card' },
+      el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Summary' }),
+        el('div', { class: 'actions' }, Object.entries(counts).filter(([, n]) => n).map(([k, n]) => el('span', { class: `stage ${STANDUP_STATUS[k][1]}`, text: `${n} ${STANDUP_STATUS[k][0].toLowerCase()}` })))),
+      el('p', { class: 'summary', text: s.summary })) : null,
+    s.updates.length ? el('div', { class: 'su-grid' }, s.updates.map((u) => el('article', { class: 'card su-person' },
+      el('div', { class: 'su-head' }, el('h3', { class: 'grow', text: u.name }), standupStatus(u.status, u.status_reason)),
+      u.status_reason ? el('p', { class: 'small subtle', text: u.status_reason }) : null,
+      ...standupLists(u),
+      u.quote ? el('p', { class: 'quote', text: `“${u.quote}”` }) : null)))
+      : (!busy && s.status === 'done' ? el('section', { class: 'card' }, el('div', { class: 'empty' }, el('strong', { text: 'No updates found' }), 'Nobody gave an update in this recording.')) : null)));
+  if (busy) poll(async () => { const x = await api(`/api/standups/${id}`); if (!isBusy(x)) { stopPolling(); route(); } });
+}
+
+/* ================= Needs an owner ================= */
+
+/** One issue the meeting talked about but nobody took on: give it to someone, or "Not needed". */
+function unownedItem(u, onDone, { showMeeting = true } = {}) {
+  const people = state.org.employees.filter((e) => e.active);
+  const who = el('select', { 'aria-label': `Who takes: ${u.description}` },
+    el('option', { value: '', text: '— Choose who takes it —' }),
+    people.map((e) => el('option', { value: String(e.id), text: e.full_name })));
+  const due = el('input', { type: 'date', 'aria-label': 'Due date (optional)', title: 'Due date (optional)' });
+  const give = el('button', { type: 'button', class: 'btn btn-sm btn-primary', disabled: true }, icon('user', 14, 2), 'Give to');
+  who.addEventListener('change', () => { give.disabled = !who.value; });
+  give.addEventListener('click', async () => {
+    give.disabled = true;
+    try {
+      const t = await api(`/api/owners/${u.id}/assign`, { method: 'POST', body: JSON.stringify({ employee_id: Number(who.value), due_date: due.value || null }) });
+      toast(`Given to ${t.assignee_name}. It is a task now: make it a ticket when you are ready.`);
+      refreshOpenCount();
+      await onDone();
+    } catch (e) { toast(e.message); give.disabled = false; }
+  });
+  const skip = el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
+    const note = prompt('Why is it not needed? (optional)', '');
+    if (note === null) return;
+    try {
+      await api(`/api/owners/${u.id}/dismiss`, { method: 'POST', body: JSON.stringify({ note }) });
+      toast('Marked as not needed.');
+      refreshOpenCount();
+      await onDone();
+    } catch (e) { toast(e.message); }
+  } }, 'Not needed');
+  return el('div', { class: 'unowned' },
+    el('div', { class: 'unowned-head' }, icon('alert', 16, 2), el('b', { class: 'grow', text: u.description })),
+    u.why ? el('p', { class: 'small', text: u.why }) : null,
+    u.quote ? el('p', { class: 'quote', text: `“${u.quote}”` }) : null,
+    showMeeting ? el('p', { class: 'small subtle' }, 'From ',
+      el('a', { href: `#/meeting/${u.meeting_id}`, text: `${u.meeting_title} (${fmtShort(u.meeting_date)})` }),
+      u.project_name ? ` · ${u.project_name}` : '') : null,
+    el('div', { class: 'unowned-actions' }, who, due, give, el('span', { class: 'spacer' }), skip));
+}
+
+async function renderOwners() {
+  const [data] = await Promise.all([api('/api/owners'), loadOrg()]);
+  const reload = async () => { refreshOpenCount(); await renderOwners(); };
+  const n = data.issues.length + data.tasks.length;
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('Don’t forget', 'Needs an owner'),
+    el('p', { class: 'muted', text: 'Work the meetings said must be done, but nobody was given it. It stays here until you give it to someone or mark it “Not needed”. When someone takes on the same work in a later meeting, it is closed automatically.' }),
+    n ? null : el('div', { class: 'empty' }, el('strong', { text: 'Everything has an owner' }), 'Nothing discussed in the meetings is left without someone responsible.'),
+    data.issues.length ? el('section', { class: 'card stack' },
+      el('div', { class: 'card-head' }, cardTitle('alert', 'Discussed, nobody took it on', 'yellow'),
+        el('span', { class: 'mono small muted', text: data.issues.length })),
+      data.issues.map((u) => unownedItem(u, reload))) : null,
+    data.tasks.length ? el('section', { class: 'card', style: { gap: '4px' } },
+      el('div', { class: 'card-head' }, cardTitle('user', 'Tasks without an assignee', 'yellow'),
+        el('span', { class: 'mono small muted', text: data.tasks.length })),
+      el('p', { class: 'small subtle', text: 'Choose who does it. The AI couldn’t tell who took it on (or only heard a speaker label).' }),
+      el('div', {}, data.tasks.map((t) => taskRow(t, { showMeeting: true, assignable: true, onChange: reload })))) : null));
+}
+
 /* ================= Outbox (emails) ================= */
 
 async function renderOutbox() {
   const list = await api('/api/outbox');
   const STATUS_EMAIL = { sent: ['Sent', 'done'], failed: ['Failed', 'error'], 'dry-run': ['Test, not sent', 'warn'] };
-  const KIND = { login: 'Sign-in code', meeting: 'Meeting summary', reminder: 'Reminder', ticket: 'New ticket' };
+  const KIND = { login: 'Sign-in code', meeting: 'Meeting summary', reminder: 'Reminder', ticket: 'New ticket', weekly: 'Weekly report', monthly: 'Monthly report', deadline: 'Due tomorrow', overdue: 'Overdue tickets' };
   const card = el('section', { class: 'card', style: { gap: 0 } },
     list.length ? list.map((o) => el('div', { class: 'outbox-row' },
       el('span', { class: 'badge' }, icon('mail', 18, 2)),
@@ -1722,10 +2391,65 @@ async function renderOutbox() {
       el('button', { type: 'button', class: 'btn', onclick: async () => {
         try { const r = await api('/api/reminders/run', { method: 'POST' }); toast(r.sent ? `Sent ${r.sent} reminder${r.sent === 1 ? '' : 's'}.` : 'No reminders for today (or already sent).'); renderOutbox(); }
         catch (e) { toast(e.message); }
-      } }, icon('mail', 16, 2), 'Send today’s reminders')),
+      } }, icon('mail', 16, 2), 'Send today’s reminders'),
+      el('button', { type: 'button', class: 'btn', onclick: async () => {
+        if (!confirm('Send this week’s report to every project manager now?')) return;
+        try { const r = await api('/api/weekly/run', { method: 'POST' }); toast(r.sent ? `Sent ${r.sent} weekly report${r.sent === 1 ? '' : 's'}.` : 'No project has a PM with an email.'); renderOutbox(); }
+        catch (e) { toast(e.message); }
+      } }, icon('report', 16, 2), 'Send weekly reports'),
+      el('button', { type: 'button', class: 'btn', onclick: async () => {
+        if (!confirm('Send last month’s report to every project manager now?')) return;
+        try { const r = await api('/api/weekly/run?period=month', { method: 'POST' }); toast(r.sent ? `Sent ${r.sent} monthly report${r.sent === 1 ? '' : 's'}.` : 'No project has a PM with an email.'); renderOutbox(); }
+        catch (e) { toast(e.message); }
+      } }, icon('report', 16, 2), 'Send monthly reports')),
     state.status.email ? null : notice('warn', 'mail', el('strong', { text: 'Email is not configured. ' }),
       'Nothing is sent out: emails are only kept here. To send them, fill in SMTP_USER and SMTP_PASSWORD (a Google App password) in .env and restart the server.'),
     card));
+}
+
+/* ================= Security log (admins) ================= */
+
+const AUDIT = {
+  'login.ok': ['Signed in', 'done'], 'login.failed': ['Wrong sign-in code', 'error'], 'login.code_requested': ['Sign-in code requested', 'work'],
+  logout: ['Signed out', 'work'], 'blocked.cross_origin': ['Blocked request from another site', 'error'],
+  'jira.send': ['Sent to Jira', 'done'], 'jira.send_failed': ['Jira send failed', 'error'], 'jira.reopen': ['Reopened ticket', 'warn'],
+  'meeting.delete': ['Deleted meeting', 'warn'], 'task.delete': ['Deleted task', 'warn'], 'ticket.delete': ['Deleted ticket', 'warn'],
+  'employee.add': ['Added person', 'work'], 'employee.edit': ['Changed person', 'work'], 'employee.delete': ['Deleted person', 'warn'],
+  'employee.import': ['Imported people', 'work'], 'team.add': ['Added team', 'work'], 'team.edit': ['Changed team', 'work'],
+  'team.delete': ['Deleted team', 'warn'], 'project.add': ['Added project', 'work'], 'project.edit': ['Changed project (PM / Jira key)', 'work'],
+  'project.delete': ['Deleted project', 'warn'],
+  'voice.consent_given': ['Voice consent recorded', 'warn'], 'voice.consent_withdrawn': ['Voice consent withdrawn', 'warn'],
+  'voice.profile_delete': ['Deleted voice profile', 'warn'], 'voice.enrolled': ['Added a voice sample', 'warn'], 'voice.speaker_named': ['Named a speaker', 'work'],
+};
+
+async function renderSecurity() {
+  let filter = '';
+  const slot = el('section', { class: 'card', style: { gap: 0 } });
+  const chips = el('div', { class: 'filter', role: 'group', 'aria-label': 'Filter the log' });
+  const paint = async () => {
+    const list = await api(`/api/audit${filter ? `?action=${encodeURIComponent(filter)}` : ''}`);
+    chips.replaceChildren(...[['', 'All'], ['login', 'Sign-ins'], ['jira', 'Jira'], ['blocked', 'Blocked'], ['employee', 'People']].map(([k, label]) => el('button', {
+      type: 'button', class: filter === k ? 'active' : '', 'aria-pressed': String(filter === k), text: label,
+      onclick: () => { filter = k; paint(); } })));
+    const failed = list.filter((e) => e.action === 'login.failed' || e.action.startsWith('blocked')).length;
+    slot.replaceChildren(...nn(
+      failed && !filter ? notice('warn', 'alert', `${failed} failed sign-in${failed === 1 ? '' : 's'} or blocked request${failed === 1 ? '' : 's'} in this list. Check that they were you.`) : null,
+      list.length ? list.map((e) => {
+        const [label, cls] = AUDIT[e.action] || [e.action, 'work'];
+        return el('div', { class: 'outbox-row' },
+          el('span', { class: 'badge' }, icon('shield', 18, 2)),
+          el('div', { class: 'grow' },
+            el('strong', { text: label, style: { color: 'var(--heading)' } }),
+            el('span', { class: 'small subtle', text: [e.at.replace('T', ' '), e.actor_email, e.ip ? `IP ${e.ip}` : null, e.target ? `#${e.target}` : null].filter(Boolean).join(' · ') }),
+            e.detail ? el('span', { class: 'small', text: e.detail }) : null),
+          el('span', { class: `status ${cls}`, text: cls === 'error' ? 'Alert' : cls === 'warn' ? 'Change' : 'OK' }));
+      }) : el('div', { class: 'empty' }, el('strong', { text: 'Nothing logged yet' }), 'Sign-ins, Jira sends, deletions and changes to people appear here.')));
+  };
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('Who did what', 'Security log', chips),
+    el('p', { class: 'muted', text: 'Every sign-in (also wrong codes), every ticket sent to Jira, every deletion and every change to people, projects and their PM or Jira key. The newest first; only administrators see this page.' }),
+    slot));
+  await paint();
 }
 
 /* ================= Upload / record dialog ================= */
@@ -1801,10 +2525,20 @@ function fillMeetingGroups() {
   paintProjects();
 }
 
-function openUpload(startMode = 'file') {
+/** kind: 'meeting' or 'standup' (a daily standup is a report per person, never tasks). */
+function openUpload(startMode = 'file', kind = 'meeting') {
   form.reset();
   errBox.textContent = '';
   document.getElementById('f-date').value = state.today;
+  const kindSel = document.getElementById('f-kind');
+  kindSel.value = kind;
+  const paintKind = () => {
+    const standup = kindSel.value === 'standup';
+    document.getElementById('upload-heading').textContent = standup ? 'New daily standup' : 'New meeting';
+    document.getElementById('f-title').placeholder = standup ? `Daily standup ${state.today}` : 'e.g. Weekly sync';
+  };
+  kindSel.onchange = paintKind;
+  paintKind();
   fillMeetingGroups();
   loadOrg().then(fillMeetingGroups).catch(() => {});
   const sel = document.getElementById('f-model');
@@ -1877,6 +2611,8 @@ form.addEventListener('submit', async (e) => {
   fd.append('language', document.getElementById('f-lang').value);
   fd.append('model', document.getElementById('f-model').value);
   fd.append('source', mode === 'record' ? 'recording' : 'audio');
+  const kind = document.getElementById('f-kind').value;
+  fd.append('kind', kind);
   for (const [key, id] of [['team_id', 'f-team'], ['project_id', 'f-project']]) {
     const v = document.getElementById(id).value;
     if (v) fd.append(key, v);
@@ -1884,8 +2620,8 @@ form.addEventListener('submit', async (e) => {
   try {
     const { id } = await api('/api/meetings', { method: 'POST', body: fd });
     dlg.close();
-    toast('Meeting added. Processing started.');
-    location.hash = `#/meeting/${id}`;
+    toast(kind === 'standup' ? 'Standup added. Processing started.' : 'Meeting added. Processing started.');
+    location.hash = kind === 'standup' ? `#/standup/${id}` : `#/meeting/${id}`;
   } catch (err) {
     errBox.textContent = err.message;
     submitBtn.disabled = false;
@@ -1946,6 +2682,7 @@ codeForm.addEventListener('submit', async (e) => {
   btn.disabled = true;
   try {
     await api('/api/auth/verify', { method: 'POST', body: JSON.stringify({ email: loginEmail, code: document.getElementById('login-code').value }) });
+    markTab(true);
     await start();
   } catch (err) { loginErr.textContent = err.message; }
   btn.disabled = false;
@@ -1955,6 +2692,7 @@ document.getElementById('login-back').addEventListener('click', showLogin);
 
 document.getElementById('logout').addEventListener('click', async () => {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+  markTab(false);
   location.hash = '#/';
   showLogin();
 });
@@ -1963,10 +2701,21 @@ document.getElementById('logout').addEventListener('click', async () => {
 
 document.querySelectorAll('[data-icon]').forEach((n) => n.replaceWith(icon(n.dataset.icon, 18, n.closest('.brand-mark') ? 2.2 : 1.9)));
 
+/* Sign in on every visit: this tab remembers that you signed in here (a refresh keeps it);
+   a new tab or window opened from the link starts at the sign-in form. */
+const TAB_KEY = 'ma-signed-in-tab';
+function tabSignedIn() { try { return sessionStorage.getItem(TAB_KEY) === '1'; } catch { return false; } }
+function markTab(on) { try { if (on) sessionStorage.setItem(TAB_KEY, '1'); else sessionStorage.removeItem(TAB_KEY); } catch { /* storage blocked */ } }
+
 async function start() {
   try {
     state.me = await api('/api/auth/me');
   } catch {
+    showLogin();
+    return;
+  }
+  if (state.me.login_each_visit && !state.me.login_disabled && !tabSignedIn()) {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
     showLogin();
     return;
   }

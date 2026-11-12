@@ -55,13 +55,13 @@ def _html(body_text, link=None, link_text=None):
     paragraphs = "".join(
         f'<p style="margin:0 0 14px;line-height:1.55">{html.escape(p).replace(chr(10), "<br>")}</p>'
         for p in body_text.strip().split("\n\n"))
-    button = (f'<p style="margin:22px 0 0"><a href="{html.escape(link)}" style="background:#683790;color:#fff;'
+    button = (f'<p style="margin:22px 0 0"><a href="{html.escape(link)}" style="background:#7646D6;color:#fff;'
               f'padding:12px 22px;border-radius:999px;text-decoration:none;font-weight:700;display:inline-block">'
               f'{html.escape(link_text or "Open")}</a></p>') if link else ""
-    return f"""<!doctype html><html><body style="margin:0;background:#FAF7FD;font-family:Arial,sans-serif;color:#2B2633">
+    return f"""<!doctype html><html><body style="margin:0;background:#F7F5FC;font-family:Arial,sans-serif;color:#2B2633">
 <div style="max-width:560px;margin:0 auto;padding:28px 16px">
-  <div style="background:#3D1466;color:#fff;border-radius:18px 18px 0 0;padding:18px 24px;font-weight:700;letter-spacing:.04em">
-    AnchorzUp <span style="color:#F3CB50">Meeting Agent</span></div>
+  <div style="background:#7445D4;background:linear-gradient(135deg,#8A5BE0,#6A3CCB);color:#fff;border-radius:18px 18px 0 0;padding:18px 24px;font-weight:700;letter-spacing:.04em">
+    AnchorzUp <span style="color:#fff;opacity:.85">Meeting Agent</span></div>
   <div style="background:#fff;border:1px solid #ECE4F6;border-top:0;border-radius:0 0 18px 18px;padding:24px">
     {paragraphs}{button}
   </div>
@@ -96,7 +96,8 @@ def send(to_email, subject, body_text, kind=None, link=None, link_text=None):
             status, error = "failed", str(e)[:500]
     with db.connect() as c:
         c.execute("INSERT INTO outbox (to_email, subject, body, kind, status, error, created_at) VALUES (?,?,?,?,?,?,?)",
-                  (to_email, subject, text if kind != "login" else _mask_code(text), kind, status, error, db.now()))
+                  (to_email, subject if kind != "login" else _mask_code(subject),
+                   text if kind != "login" else _mask_code(text), kind, status, error, db.now()))
     return status
 
 

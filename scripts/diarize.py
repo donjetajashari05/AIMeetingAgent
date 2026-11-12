@@ -11,8 +11,10 @@ DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 SAMPLE_RATE = 16000
 
 
-def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None):
-    """Return a list of speaker turns: [{"start", "end", "speaker"}, ...]."""
+def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None, with_embeddings=False):
+    """Return a list of speaker turns: [{"start", "end", "speaker"}, ...].
+    with_embeddings=True returns (turns, {speaker: voice embedding as a list of floats}): one
+    "voice fingerprint" per speaker, used to recognize people by their voice."""
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise SystemExit(
@@ -55,10 +57,20 @@ def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None)
     # The "exclusive" version has no overlapping turns, which suits transcripts better.
     annotation = getattr(output, "exclusive_speaker_diarization", output)
 
-    return [
+    turns = [
         {"start": turn.start, "end": turn.end, "speaker": speaker}
         for turn, _, speaker in annotation.itertracks(yield_label=True)
     ]
+    if not with_embeddings:
+        return turns
+    embeddings = {}
+    vectors = getattr(output, "speaker_embeddings", None)
+    if vectors is not None:
+        # One row per speaker, in speaker_diarization.labels() order (pyannote 4)
+        for label, vec in zip(output.speaker_diarization.labels(), vectors):
+            if vec is not None and float(abs(vec).sum()) > 0:  # zero rows = no reliable voice
+                embeddings[label] = [float(x) for x in vec]
+    return turns, embeddings
 
 
 def _speaker_at(start, end, turns):
@@ -74,15 +86,16 @@ def _speaker_at(start, end, turns):
     return best
 
 
-def assign_speakers(words, turns, label="Speaker"):
+def assign_speakers(words, turns, label="Speaker", mapping_out=None):
     """
     Assign a speaker to each word and group consecutive words of the same speaker
     into utterances. Speakers are renamed "Speaker 1", "Speaker 2", ... in order
     of first appearance.
 
     words: [{"start", "end", "word"}, ...] (from faster-whisper word_timestamps)
+    mapping_out: a dict that receives {raw pyannote label: "Speaker N"}.
     """
-    names = {}
+    names = mapping_out if mapping_out is not None else {}
     utterances = []
     for w in words:
         raw = _speaker_at(w["start"], w["end"], turns) or "UNKNOWN"
@@ -95,7 +108,8 @@ def assign_speakers(words, turns, label="Speaker"):
             u["end"] = w["end"]
             u["text"] += w["word"]
         else:
-            utterances.append({"speaker": speaker, "start": w["start"],
+            # "label" keeps the original "Speaker N" even after a name is put on it
+            utterances.append({"speaker": speaker, "label": speaker, "start": w["start"],
                                "end": w["end"], "text": w["word"]})
 
     for u in utterances:

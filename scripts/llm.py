@@ -10,6 +10,7 @@ Note: with Groq the transcript is sent to Groq's servers.
 """
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -23,6 +24,10 @@ NO_KEY = "No AI key: add GROQ_API_KEY (free) or ANTHROPIC_API_KEY to .env."
 
 class LLMError(Exception):
     pass
+
+
+class TooLarge(LLMError):
+    """The request is bigger than the provider accepts at once (split it into smaller parts)."""
 
 
 def provider():
@@ -48,30 +53,44 @@ def label():
 
 # ---------- Groq (OpenAI-compatible HTTP API) ----------
 
-def _groq(path, body=None):
-    req = urllib.request.Request(
-        GROQ_URL + path, method="POST" if body is not None else "GET",
-        data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}",
-                 "Content-Type": "application/json", "User-Agent": "meeting-agent"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
+def _groq(path, body=None, tries=4):
+    for attempt in range(tries):
+        req = urllib.request.Request(
+            GROQ_URL + path, method="POST" if body is not None else "GET",
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}",
+                     "Content-Type": "application/json", "User-Agent": "meeting-agent"})
         try:
-            msg = json.loads(e.read()).get("error", {}).get("message", "")
-        except Exception:
-            msg = str(e.reason)
-        if e.code == 401:
-            raise LLMError("GROQ_API_KEY is not valid.")
-        if e.code == 429:
-            raise LLMError("Groq: free request limit reached. Wait a little and try again.")
-        if e.code in (400, 404) and "model" in msg.lower():
-            models = ", ".join(groq_models()) or "see console.groq.com/docs/models"
-            raise LLMError(f"Groq: the model “{groq_model()}” doesn’t work ({msg}). Set GROQ_MODEL in .env. Models: {models}")
-        raise LLMError(f"Groq {e.code}: {msg}"[:400])
-    except urllib.error.URLError as e:
-        raise LLMError(f"Could not reach Groq: {e.reason}")
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read()).get("error", {}).get("message", "")
+            except Exception:
+                msg = str(e.reason)
+            low = msg.lower()
+            if e.code == 401:
+                raise LLMError("GROQ_API_KEY is not valid.")
+            if e.code == 413 or "too large" in low or "context_length" in low or "context length" in low:
+                raise TooLarge(f"Groq: the request is too large ({msg})"[:400])
+            if e.code == 429:
+                # Per-minute limits (long meetings are sent in parts): wait as Groq asks, then retry
+                try:
+                    wait = float(e.headers.get("retry-after") or 0)
+                except ValueError:
+                    wait = 0
+                wait = wait or 15 * (attempt + 1)
+                if attempt + 1 < tries and wait <= 90 and "per day" not in low:
+                    time.sleep(wait + 1)
+                    continue
+                raise LLMError("Groq: free request limit reached. Wait a little and try again."
+                               + (" (daily limit)" if "per day" in low else ""))
+            if e.code in (400, 404) and "model" in low:
+                models = ", ".join(groq_models()) or "see console.groq.com/docs/models"
+                raise LLMError(f"Groq: the model “{groq_model()}” doesn’t work ({msg}). Set GROQ_MODEL in .env. Models: {models}")
+            raise LLMError(f"Groq {e.code}: {msg}"[:400])
+        except urllib.error.URLError as e:
+            raise LLMError(f"Could not reach Groq: {e.reason}")
 
 
 def groq_models():
@@ -92,7 +111,7 @@ def _groq_chat(system, user, max_tokens, json_mode):
         body["response_format"] = {"type": "json_object"}
     choice = _groq("/chat/completions", body)["choices"][0]
     if choice.get("finish_reason") == "length":
-        raise LLMError("The answer was cut off (too long). Try a shorter transcript.")
+        raise TooLarge("The answer was cut off (too long).")
     return choice["message"].get("content") or ""
 
 
@@ -111,6 +130,8 @@ def _claude(call):
     except anthropic.APIConnectionError:
         raise LLMError("Could not reach Claude. Check the internet connection.")
     except anthropic.APIStatusError as e:
+        if e.status_code == 413 or "too long" in str(e.message).lower():
+            raise TooLarge(f"Claude: the request is too large ({e.message})")
         raise LLMError(f"Claude API error: {e.message}")
 
 
@@ -130,7 +151,7 @@ def structured(system, user, schema: type[BaseModel], max_tokens=16000, effort="
         if response.stop_reason == "refusal":
             raise LLMError("The model declined to process this transcript.")
         if response.stop_reason == "max_tokens" or response.parsed_output is None:
-            raise LLMError("The answer was cut off (too long). Try a shorter transcript.")
+            raise TooLarge("The answer was cut off (too long).")
         return response.parsed_output
 
     if p == "groq":

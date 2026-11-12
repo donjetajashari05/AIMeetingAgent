@@ -99,12 +99,13 @@ def rows(cursor):
 # ---------- Meetings ----------
 
 def create_meeting(title, meeting_date, source, file_path, model, language_hint, team_id=None, project_id=None,
-                   created_by=None):
+                   created_by=None, kind="meeting"):
     with connect() as c:
         cur = c.execute(
             "INSERT INTO meetings (title, meeting_date, created_at, source, file_path, model, "
-            "language_hint, status, team_id, project_id, created_by) VALUES (?,?,?,?,?,?,?, 'queued', ?, ?, ?)",
-            (title, meeting_date, now(), source, file_path, model, language_hint, team_id, project_id, created_by),
+            "language_hint, status, team_id, project_id, created_by, kind) VALUES (?,?,?,?,?,?,?, 'queued', ?, ?, ?, ?)",
+            (title, meeting_date, now(), source, file_path, model, language_hint, team_id, project_id, created_by,
+             kind if kind in ("meeting", "standup") else "meeting"),
         )
         return cur.lastrowid
 
@@ -130,7 +131,10 @@ def _in(ids):
 
 def list_meetings(meeting_ids=None):
     """meeting_ids: None = all, otherwise only these."""
-    where = "" if meeting_ids is None else f"WHERE m.id IN ({_in(meeting_ids)})"
+    where = "WHERE m.source != 'manual'"  # the hidden holder of hand-written tickets
+    where += " AND m.kind != 'standup'"     # daily standups have their own page
+    if meeting_ids is not None:
+        where += f" AND m.id IN ({_in(meeting_ids)})"
     with connect() as c:
         return rows(c.execute(f"""
             SELECT m.id, m.title, m.meeting_date, m.created_at, m.source, m.status, m.progress,
@@ -168,6 +172,26 @@ def save_transcript(meeting_id, data):
         )
 
 
+PRIORITIES = ("high", "medium", "low")
+PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def check_priority(value):
+    value = (value or "").strip().lower()
+    return value if value in PRIORITIES else None
+
+
+def check_estimate(value):
+    """Hours, rounded to 0.5, between 0.5 and 400; anything else = not set."""
+    try:
+        h = float(value)
+    except (TypeError, ValueError):
+        return None
+    if h != h or h <= 0:
+        return None
+    return min(400.0, max(0.5, round(h * 2) / 2))
+
+
 def save_notes(meeting_id, notes):
     """Store the LLM output (summary, decisions, tasks) and index it."""
     with connect() as c:
@@ -177,23 +201,28 @@ def save_notes(meeting_id, notes):
         c.execute("DELETE FROM tasks WHERE meeting_id = ? AND approved_at IS NULL AND jira_key IS NULL "
                   "AND is_ticket = 0 AND merged_into IS NULL AND merged_from IS NULL", (meeting_id,))
         c.execute("DELETE FROM chunks WHERE meeting_id = ? AND kind != 'utterance'", (meeting_id,))
-        c.execute("UPDATE meetings SET summary = ?, open_questions = ?, completed = ? WHERE id = ?",
+        c.execute("UPDATE meetings SET summary = ?, open_questions = ?, completed = ?, topics = ? WHERE id = ?",
                   (notes["summary"], json.dumps(notes["open_questions"], ensure_ascii=False),
-                   json.dumps(notes.get("completed") or [], ensure_ascii=False), meeting_id))
+                   json.dumps(notes.get("completed") or [], ensure_ascii=False),
+                   json.dumps(notes.get("topics") or [], ensure_ascii=False), meeting_id))
         for d in notes["decisions"]:
             c.execute("INSERT INTO decisions (meeting_id, description, quote) VALUES (?,?,?)",
                       (meeting_id, d["description"], d["quote"]))
-        kept = {r[0].strip().lower() for r in c.execute(
-            "SELECT description FROM tasks WHERE meeting_id = ? AND merged_from IS NULL", (meeting_id,))}
+        from . import dedupe
+        kept = [{"description": r[0], "who": r[1]} for r in c.execute(
+            "SELECT description, assignee FROM tasks WHERE meeting_id = ? AND (merged_from IS NULL OR is_ticket = 1)",
+            (meeting_id,))]
         for t in notes["tasks"]:
-            if t["description"].strip().lower() in kept:
-                continue  # already confirmed/sent with the same title
+            if dedupe.best_match(t["description"], kept, t["assignee"]):
+                continue  # already confirmed/sent (or made into a ticket) as the same work
             c.execute(
-                "INSERT INTO tasks (meeting_id, description, assignee, due_date, due_date_text, quote, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (meeting_id, t["description"], t["assignee"], t["due_date"], t["due_date_text"], t["quote"], now()),
+                "INSERT INTO tasks (meeting_id, description, assignee, due_date, due_date_text, quote, created_at, "
+                "priority, priority_reason, estimate_hours) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (meeting_id, t["description"], t["assignee"], t["due_date"], t["due_date_text"], t["quote"], now(),
+                 check_priority(t.get("priority")), t.get("priority_reason"), check_estimate(t.get("estimate_hours"))),
             )
         index = [(notes["summary"], meeting_id, "summary", None, None)]
+        index += [(f"{tp['title']}: {tp['summary']}", meeting_id, "summary", None, None) for tp in notes.get("topics") or []]
         index += [(d["description"], meeting_id, "decision", None, None) for d in notes["decisions"]]
         index += [(t["description"] + (f" ({t['assignee']})" if t["assignee"] else ""), meeting_id, "task", None, None)
                   for t in notes["tasks"]]
@@ -218,6 +247,7 @@ def meeting_detail(meeting_id):
     m["transcript"] = json.loads(m["transcript"]) if m["transcript"] else None
     m["open_questions"] = json.loads(m["open_questions"]) if m["open_questions"] else []
     m["completed"] = json.loads(m["completed"]) if m.get("completed") else []
+    m["topics"] = json.loads(m["topics"]) if m.get("topics") else []
     m.pop("file_path", None)
     return m
 
@@ -227,7 +257,7 @@ def meeting_detail(meeting_id):
 TASK_SELECT = """
     SELECT t.*, COALESCE(e.full_name, t.assignee) AS assignee_name,
            COALESCE(t.assignee_email, e.email) AS recipient_email,
-           m.title AS meeting_title, m.meeting_date, m.project_id,
+           m.title AS meeting_title, m.meeting_date, m.project_id, m.source AS meeting_source,
            pr.name AS project_name, COALESCE(t.jira_project, pr.jira_key) AS ticket_project,
            sb.full_name AS sent_by_name,
            tk.description AS ticket_title, tk.jira_key AS ticket_jira_key, tk.approved_at AS ticket_approved_at
@@ -254,7 +284,8 @@ def list_tickets(meeting_ids=None):
     return tickets
 
 
-def create_ticket(sources, title, details, assignee_id=None, assignee=None, due_date=None):
+def create_ticket(sources, title, details, assignee_id=None, assignee=None, due_date=None,
+                  priority=None, priority_reason=None, estimate_hours=None):
     """One ticket (a draft on the Tickets page) made from one or more tasks.
     The ticket belongs to the newest source meeting; the tasks point to it."""
     ids = [t["id"] for t in sources]
@@ -263,11 +294,43 @@ def create_ticket(sources, title, details, assignee_id=None, assignee=None, due_
     with connect() as c:
         ticket_id = c.execute(
             "INSERT INTO tasks (meeting_id, description, details, assignee_id, assignee, due_date, quote, created_at, "
-            "is_ticket, merged_from) VALUES (?,?,?,?,?,?,?,?,1,?)",
-            (home["meeting_id"], title, details, assignee_id, assignee, due_date, quote, now(), json.dumps(ids)),
+            "is_ticket, merged_from, priority, priority_reason, estimate_hours) VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?)",
+            (home["meeting_id"], title, details, assignee_id, assignee, due_date, quote, now(), json.dumps(ids),
+             check_priority(priority), priority_reason, check_estimate(estimate_hours)),
         ).lastrowid
         c.execute(f"UPDATE tasks SET merged_into = ? WHERE id IN ({_in(ids)})", (ticket_id, *ids))
     return ticket_id
+
+
+MANUAL_TITLE = "Written tickets"
+
+
+def manual_holder(project_id, user_id):
+    """Tickets the PM writes by hand (no meeting) hang on a hidden "meeting" with source 'manual',
+    one per project, so they get the project, permissions and Jira key like any other ticket.
+    It never shows in the meetings list."""
+    with connect() as c:
+        r = c.execute("SELECT id FROM meetings WHERE source = 'manual' AND project_id IS ? ORDER BY id LIMIT 1",
+                      (project_id,)).fetchone()
+        if r:
+            return r[0]
+        return c.execute(
+            "INSERT INTO meetings (title, meeting_date, created_at, source, status, progress, project_id, created_by) "
+            "VALUES (?, date('now'), ?, 'manual', 'done', 1, ?, ?)", (MANUAL_TITLE, now(), project_id, user_id)).lastrowid
+
+
+def create_manual_ticket(meeting_id, title, details=None, assignee_id=None, assignee=None, due_date=None,
+                         jira_project=None, assignee_email=None, priority=None, priority_reason=None,
+                         estimate_hours=None):
+    """A ticket written by hand. merged_from = [] marks it as a ticket that is not also a task."""
+    with connect() as c:
+        return c.execute(
+            "INSERT INTO tasks (meeting_id, description, details, assignee_id, assignee, assignee_email, due_date, "
+            "jira_project, created_at, approved_at, is_ticket, merged_from, priority, priority_reason, estimate_hours) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,1,'[]',?,?,?)",
+            (meeting_id, title, details, assignee_id, assignee, assignee_email, due_date, jira_project, now(), now(),
+             check_priority(priority), priority_reason, check_estimate(estimate_hours)),
+        ).lastrowid
 
 
 def remove_ticket(ticket_id):
@@ -316,9 +379,10 @@ def get_task(task_id):
 
 
 def edit_task(task_id, **fields):
-    """PM edits: description, due_date, approved (bool), assignee_email, details, jira_project."""
+    """PM edits: description, due_date, approved (bool), assignee_email, details, jira_project,
+    priority, priority_reason, estimate_hours."""
     sets, args = [], []
-    for col in ("assignee_email", "details", "jira_project"):
+    for col in ("assignee_email", "details", "jira_project", "priority", "priority_reason", "estimate_hours"):
         if col in fields:
             sets.append(f"{col} = ?")
             args.append(fields[col])
@@ -359,7 +423,7 @@ def approve_all(meeting_id):
 
 def set_task_status(task_id, status):
     with connect() as c:
-        c.execute("UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+        c.execute("UPDATE tasks SET status = ?, completed_at = ?, done_by_jira = 0 WHERE id = ?",
                   (status, now() if status == "done" else None, task_id))
     return get_task(task_id)
 
@@ -399,12 +463,15 @@ def _fts_query(question):
     return " OR ".join(terms)
 
 
-def search(question, limit=8, meeting_ids=None):
-    """meeting_ids: None = search everything, otherwise only these meetings."""
+def search(question, limit=8, meeting_ids=None, tasks=True):
+    """meeting_ids: None = search everything, otherwise only these meetings. tasks=False leaves the tasks out."""
     q = _fts_query(question)
     if not q:
         return []
     only = "" if meeting_ids is None else f" AND m.id IN ({_in(meeting_ids)})"
+    if not tasks:
+        only += " AND ch.kind != 'task'"
+        only += " AND m.kind != 'standup'"  # standup reports are for PMs too
     with connect() as c:
         return rows(c.execute(f"""
             SELECT ch.text, ch.kind, ch.start, ch.speaker, ch.meeting_id,

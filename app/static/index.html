@@ -42,13 +42,16 @@
     <nav class="nav" aria-label="Main navigation">
       <a href="#/" data-route="home"><span data-icon="grid"></span>Dashboard</a>
       <a href="#/meetings" data-route="meetings"><span data-icon="mic"></span>Meetings</a>
-      <a href="#/tasks" data-route="tasks"><span data-icon="check"></span>Tasks<span class="nav-count" id="open-count"></span></a>
-      <a href="#/tickets" data-route="tickets" data-role="manager"><span data-icon="jira"></span>Tickets<span class="nav-count" id="ticket-count"></span></a>
+      <a href="#/standups" data-route="standups" data-role="manager"><span data-icon="clock"></span>Daily standups</a>
+      <a href="#/tasks" data-route="tasks" data-role="manager"><span data-icon="check"></span>Tasks<span class="nav-count" id="open-count" title="Open tasks"></span><span class="nav-count jira" id="ticket-count" title="Tickets to send"></span></a>
+      <a href="#/owners" data-route="owners" data-role="manager"><span data-icon="alert"></span>Needs an owner<span class="nav-count warn" id="owner-count" title="Without an owner"></span></a>
       <a href="#/ask" data-route="ask"><span data-icon="chat"></span>Ask the archive</a>
+      <a href="#/weekly" data-route="weekly" data-role="manager"><span data-icon="report"></span>Reports</a>
       <span class="nav-label" data-role="admin">Settings</span>
       <a href="#/team" data-route="team" data-role="admin"><span data-icon="users"></span>Team</a>
       <a href="#/vocabulary" data-route="vocabulary" data-role="admin"><span data-icon="book"></span>Vocabulary</a>
       <a href="#/outbox" data-route="outbox" data-role="admin"><span data-icon="mail"></span>Emails sent</a>
+      <a href="#/security" data-route="security" data-role="admin"><span data-icon="shield"></span>Security log</a>
     </nav>
     <div class="integrations" data-role="admin">
       <span class="eyebrow">Connections</span>
@@ -69,7 +72,7 @@
 <dialog id="upload-dialog" class="dialog">
   <form method="dialog" id="upload-form" class="dialog-body">
     <div class="dialog-head">
-      <h2>New meeting</h2>
+      <h2 id="upload-heading">New meeting</h2>
       <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="x"></span></button>
     </div>
     <div class="tabs" role="tablist">
@@ -97,6 +100,12 @@
     </div>
 
     <div class="field-grid">
+      <label class="field field-wide">Type
+        <select id="f-kind">
+          <option value="meeting" selected>Meeting (decisions, tasks and tickets)</option>
+          <option value="standup">Daily standup (a report per person, no tickets)</option>
+        </select>
+      </label>
       <label class="field field-wide">Title
         <input type="text" id="f-title" placeholder="e.g. Weekly sync" maxlength="200">
       </label>

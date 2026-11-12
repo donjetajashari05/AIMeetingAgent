@@ -48,6 +48,13 @@ def meeting_processed(meeting_id):
     lines = [f"Hi {pm['full_name'].split()[0]},",
              f"The meeting “{m['title']}” ({m['meeting_date']}) of the {project} project has been processed.",
              "SUMMARY\n" + (m["summary"] or "—")]
+    from . import owners
+    loose = owners.open_items({meeting_id})
+    if loose["issues"] or loose["tasks"]:
+        lines.append(f"⚠ NO OWNER ({len(loose['issues']) + len(loose['tasks'])}): discussed, but nobody was given it\n"
+                     + "\n".join([f"• {u['description']}" + (f" — {u['why']}" if u["why"] else "") for u in loose["issues"]]
+                                 + [f"• {t['description']} (task without an assignee)" for t in loose["tasks"]])
+                     + "\nGive each one to someone (or mark it “Not needed”) in “Needs an owner”.")
     if m["decisions"]:
         lines.append("DECISIONS\n" + "\n".join(f"• {d['description']}" for d in m["decisions"]))
     if m["tasks"]:
@@ -83,20 +90,35 @@ def send_daily_reminders(today=None):
                 ORDER BY t.due_date
             """, (pm["id"], tomorrow)))
             c.execute("INSERT OR IGNORE INTO reminder_log (pm_id, sent_on) VALUES (?, ?)", (pm["id"], today.isoformat()))
-            if tasks:
-                digests.append((pm, tasks))
+            mids = {r[0] for r in c.execute("SELECT m.id FROM meetings m JOIN projects p ON p.id = m.project_id "
+                                            "WHERE p.pm_id = ?", (pm["id"],))}
+            digests.append((pm, tasks, mids))
+
+    from . import owners
+    digests = [(pm, tasks, owners.open_items(mids) if mids else {"issues": [], "tasks": []})
+               for pm, tasks, mids in digests]
+    digests = [d for d in digests if d[1] or d[2]["issues"] or d[2]["tasks"]]
 
     fmt = lambda t: (f"• {t['description']} — {t['who'] or 'unassigned'} ({t['project']}, due {t['due_date']})"
                      + (f" [{t['jira_key']}]" if t["jira_key"] else ""))
-    for pm, tasks in digests:
+    for pm, tasks, loose in digests:
         late = [t for t in tasks if t["due_date"] < today.isoformat()]
         soon = [t for t in tasks if t["due_date"] >= today.isoformat()]
         parts = [f"Hi {pm['full_name'].split()[0]},"]
+        n_loose = len(loose["issues"]) + len(loose["tasks"])
+        if n_loose:
+            parts.append(f"⚠ STILL WITHOUT AN OWNER ({n_loose})\n" + "\n".join(
+                [f"• {u['description']} (from “{u['meeting_title']}”, {u['meeting_date']})" for u in loose["issues"]]
+                + [f"• {t['description']} (task without an assignee, “{t['meeting_title']}”)" for t in loose["tasks"]])
+                + f"\nGive them to someone: {mailer.app_url()}/#/owners")
         if late:
             parts.append(f"LATE ({len(late)})\n" + "\n".join(map(fmt, late)))
         if soon:
             parts.append(f"DUE TODAY OR TOMORROW ({len(soon)})\n" + "\n".join(map(fmt, soon)))
-        subject = (f"Reminder: {len(late)} late task(s)" if late else f"Reminder: {len(soon)} task(s) due soon")
+        subject = (f"Reminder: {len(late)} late task(s)" if late else f"Reminder: {len(soon)} task(s) due soon" if soon
+                   else f"Reminder: {n_loose} item(s) without an owner")
+        if n_loose and (late or soon):
+            subject += f", {n_loose} without an owner"
         mailer.send(pm["email"], subject, "\n\n".join(parts), kind="reminder",
                     link=f"{mailer.app_url()}/#/tasks", link_text="View tasks")
     return len(digests)
@@ -110,6 +132,8 @@ def start_scheduler():
             try:
                 if datetime.now().hour >= hour:
                     send_daily_reminders()
+                    from . import deadlines
+                    deadlines.run()  # due tomorrow -> the person; overdue in Jira -> the PM
             except Exception:
                 traceback.print_exc()
             time.sleep(15 * 60)
