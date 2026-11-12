@@ -13,6 +13,7 @@ Examples:
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -60,7 +61,7 @@ Remove such machine repetitions/hallucinations; keep repetitions that a person c
 Use the vocabulary for spelling of names and terms. <learned_corrections> lists mistakes this
 recognizer made before and how the team corrected them ("wrong -> right"): when the same mistake
 appears again and fits the context, fix it the same way. Return only the lines you changed, each as
-the complete corrected line."""
+the complete corrected line: only the spoken text, without the "[n]" number or the speaker name."""
 
 
 def _lines_text(lines, offset):
@@ -69,6 +70,15 @@ def _lines_text(lines, offset):
         who = f"{l['speaker']}: " if l.get("speaker") else ""
         out.append(f"[{offset + n}] {who}{l['text']}")
     return "\n".join(out)
+
+
+def _strip_prefix(text, line):
+    """Remove a "[12] Folësi 2: " the AI copied from the input format."""
+    text = re.sub(r"^\s*\[\d+\]\s*", "", text.strip())
+    who = line.get("speaker")
+    if who and text.startswith(f"{who}:"):
+        text = text[len(who) + 1:]
+    return text.strip()
 
 
 def correct_lines(lines, glossary=(), people=(), client=None, on_progress=None, learned=()):
@@ -96,7 +106,7 @@ def correct_lines(lines, glossary=(), people=(), client=None, on_progress=None, 
             continue  # refusal, cut-off or bad output: keep this chunk as transcribed
         for fix in result.fixes:
             n = fix.i - start
-            new = fix.text.strip()
+            new = _strip_prefix(fix.text, chunk[n] if 0 <= n < len(chunk) else {})
             if 0 <= n < len(chunk) and new and new != chunk[n]["text"]:
                 changes[fix.i] = new
         if on_progress:

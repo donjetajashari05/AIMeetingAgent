@@ -180,7 +180,7 @@ def speakers(meeting_id):
     return out
 
 
-def name_speaker(meeting_id, label, employee_id):
+def name_speaker(meeting_id, label, employee_id, name=None):
     """The PM says who a speaker is (employee_id None = unknown again). Renames the speaker in the
     transcript, the search index, the AI's draft tasks and the standup report, and, if the person
     agreed, learns their voice from this meeting. Returns {"name", "learned"}."""
@@ -197,14 +197,13 @@ def name_speaker(meeting_id, label, employee_id):
             emp = c.execute("SELECT id, full_name, voice_consent_at FROM employees WHERE id = ?", (employee_id,)).fetchone()
             if not emp:
                 raise VoiceError("Employee not found.")
-        # One person is one speaker in a meeting
-        if emp:
-            c.execute("DELETE FROM meeting_speakers WHERE meeting_id = ? AND employee_id = ? AND label != ?",
-                      (meeting_id, emp["id"], label))
+        # The same person may be on two labels: diarization sometimes splits one voice in two
         c.execute("DELETE FROM meeting_speakers WHERE meeting_id = ? AND label = ?", (meeting_id, label))
-        if emp:
+        typed = " ".join((name or "").split())[:100] if not emp else ""
+        if emp or typed:
             c.execute("INSERT INTO meeting_speakers (meeting_id, label, employee_id, name, similarity, source) "
-                      "VALUES (?,?,?,?,NULL,'manual')", (meeting_id, label, emp["id"], emp["full_name"]))
+                      "VALUES (?,?,?,?,NULL,'manual')", (meeting_id, label, emp["id"] if emp else None,
+                                                          emp["full_name"] if emp else typed))
         names = {r["label"]: r["name"] for r in c.execute(
             "SELECT label, name FROM meeting_speakers WHERE meeting_id = ?", (meeting_id,))}
     renamed = {}
@@ -215,7 +214,7 @@ def name_speaker(meeting_id, label, employee_id):
             renamed[u.get("speaker")] = new
             u["speaker"] = new
     db.save_transcript(meeting_id, data)  # also re-indexes search with the names
-    new_name = emp["full_name"] if emp else label
+    new_name = emp["full_name"] if emp else (typed or label)
     with db.connect() as c:
         for old in set(renamed) | {label}:
             # Only the AI's drafts: tasks the PM confirmed or sent keep their assignee
@@ -224,7 +223,9 @@ def name_speaker(meeting_id, label, employee_id):
                       (new_name, emp["id"] if emp else None, meeting_id, old))
             c.execute("UPDATE standup_updates SET person = ?, employee_id = ? WHERE meeting_id = ? AND person = ?",
                       (new_name, emp["id"] if emp else None, meeting_id, old))
-    learned = bool(emp and emp["voice_consent_at"] and learn(emp["id"], meeting_id, label))
+    # A few seconds give an unreliable fingerprint: learn only from enough speech
+    talk = sum(u["end"] - u["start"] for u in data["utterances"] if u.get("label") == label)
+    learned = bool(emp and emp["voice_consent_at"] and talk >= MIN_SAMPLE_SEC and learn(emp["id"], meeting_id, label))
     return {"name": new_name, "learned": learned, "consent": bool(emp and emp["voice_consent_at"])}
 
 
@@ -253,7 +254,7 @@ def _add_to_profile(c, employee_id, vec):
 
 # ---------- Voice sample on the Team page (names from the first meeting) ----------
 
-def sample_fingerprint(audio_path):
+def sample_fingerprint(audio_path, min_sec=MIN_SAMPLE_SEC):
     """Fingerprint of the one person speaking in a short sample. Refuses samples that are too
     short or have a second voice in them (the profile would mix two people)."""
     from diarize import diarize  # loads pyannote (needs HF_TOKEN)
@@ -269,13 +270,24 @@ def sample_fingerprint(audio_path):
         raise VoiceError("No speech was found in the sample.")
     ranked = sorted(talk.items(), key=lambda kv: kv[1], reverse=True)
     main, seconds = ranked[0]
-    if seconds < MIN_SAMPLE_SEC:
-        raise VoiceError(f"Only {seconds:.0f} seconds of speech. Record at least {MIN_SAMPLE_SEC} seconds (30 is better).")
+    if seconds < min_sec:
+        raise VoiceError(f"Only {seconds:.0f} seconds of speech. Record at least {min_sec} seconds.")
     if len(ranked) > 1 and ranked[1][1] > max(3.0, 0.2 * seconds):
         raise VoiceError("More than one voice is in the sample. Record the person alone, in a quiet room.")
     if main not in vectors:
         raise VoiceError("The voice could not be measured. Try a clearer recording.")
     return np.asarray(vectors[main], dtype=np.float32), seconds
+
+
+def test(vec):
+    """Who does this voice sound like? For trying recognition out: nothing is stored."""
+    v = _norm(vec)
+    with db.connect() as c:
+        profiles = _profiles(c)
+    ranked = sorted(((float(np.dot(v, p)), name) for _, name, p in profiles), reverse=True)
+    found = match({"x": v}, profiles).get("x")
+    return {"name": found[1] if found else None, "threshold": threshold(), "profiles": len(profiles),
+            "ranked": [{"name": n, "similarity": round(s, 3)} for s, n in ranked[:5]]}
 
 
 def enroll(employee_id, vec):

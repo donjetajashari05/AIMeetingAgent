@@ -60,7 +60,7 @@ def word_fixes(old, new):
 
 def learn(old, new):
     """Save the fixes from one edited line. Returns them as [{"wrong", "right"}]."""
-    fixes = word_fixes(old, new)
+    fixes = [(w, r) for w, r in word_fixes(old, new) if w.lower() != r.lower()]  # a capital letter is not a mistake
     with db.connect() as c:
         for wrong, right in fixes:
             c.execute("""INSERT INTO corrections (wrong, right, created_at, updated_at) VALUES (?,?,?,?)
@@ -91,6 +91,8 @@ def rules():
     out = {}
     with db.connect() as c:
         for r in c.execute("SELECT wrong, right, times FROM corrections WHERE active = 1 ORDER BY times, updated_at"):
+            if r["wrong"].lower() == r["right"].lower():
+                continue  # only the capital letter changed (e.g. "e" -> "E" at a sentence start)
             if len(r["wrong"]) >= 3 or r["times"] >= 2:
                 out[r["wrong"]] = r["right"]
     return out
@@ -153,4 +155,5 @@ def examples(limit=60):
     """[(wrong, right)] for the AI correction prompt."""
     with db.connect() as c:
         return [(r[0], r[1]) for r in c.execute(
-            "SELECT wrong, right FROM corrections WHERE active = 1 ORDER BY times DESC, updated_at DESC LIMIT ?", (limit,))]
+            "SELECT wrong, right FROM corrections WHERE active = 1 AND lower(wrong) != lower(right) "
+            "ORDER BY times DESC, updated_at DESC LIMIT ?", (limit,))]

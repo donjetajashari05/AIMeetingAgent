@@ -59,6 +59,7 @@ MIGRATIONS = {
         "completed": "TEXT",   # JSON list: work reported as already done (not tickets)
         "kind": "TEXT NOT NULL DEFAULT 'meeting'",  # meeting | standup (a daily standup: a report, never tasks)
         "topics": "TEXT",      # JSON list of {title, summary}: what was discussed (most of it is not a task)
+        "speakers_hint": "INTEGER",  # how many people spoke, if the PM said so (helps split the voices)
     },
     "tasks": {
         "assignee_id": "INTEGER REFERENCES employees(id) ON DELETE SET NULL",

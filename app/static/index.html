@@ -49,6 +49,7 @@
       <a href="#/weekly" data-route="weekly" data-role="manager"><span data-icon="report"></span>Reports</a>
       <span class="nav-label" data-role="admin">Settings</span>
       <a href="#/team" data-route="team" data-role="admin"><span data-icon="users"></span>Team</a>
+      <a href="#/voices" data-route="voices" data-role="admin"><span data-icon="mic"></span>Voice recognition</a>
       <a href="#/vocabulary" data-route="vocabulary" data-role="admin"><span data-icon="book"></span>Vocabulary</a>
       <a href="#/outbox" data-route="outbox" data-role="admin"><span data-icon="mail"></span>Emails sent</a>
       <a href="#/security" data-route="security" data-role="admin"><span data-icon="shield"></span>Security log</a>
@@ -75,6 +76,21 @@
       <h2 id="upload-heading">New meeting</h2>
       <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="x"></span></button>
     </div>
+    <div class="field-grid upload-top">
+      <label class="field field-wide">Type
+        <select id="f-kind">
+          <option value="meeting" selected>Meeting (decisions, tasks and tickets)</option>
+          <option value="standup">Daily standup (a report per person, no tickets)</option>
+        </select>
+      </label>
+      <label class="field">Team
+        <select id="f-team"></select>
+      </label>
+      <label class="field">Project
+        <select id="f-project"></select>
+      </label>
+    </div>
+
     <div class="tabs" role="tablist">
       <button type="button" role="tab" class="tab active" data-mode="file" aria-selected="true">Upload a file</button>
       <button type="button" role="tab" class="tab" data-mode="record" aria-selected="false">Record now</button>
@@ -100,23 +116,11 @@
     </div>
 
     <div class="field-grid">
-      <label class="field field-wide">Type
-        <select id="f-kind">
-          <option value="meeting" selected>Meeting (decisions, tasks and tickets)</option>
-          <option value="standup">Daily standup (a report per person, no tickets)</option>
-        </select>
-      </label>
       <label class="field field-wide">Title
         <input type="text" id="f-title" placeholder="e.g. Weekly sync" maxlength="200">
       </label>
       <label class="field">Meeting date
         <input type="date" id="f-date" required>
-      </label>
-      <label class="field">Team
-        <select id="f-team"></select>
-      </label>
-      <label class="field">Project
-        <select id="f-project"></select>
       </label>
       <label class="field">Spoken language
         <select id="f-lang">
@@ -124,6 +128,10 @@
           <option value="">Detect automatically</option>
           <option value="en">English</option>
         </select>
+      </label>
+      <label class="field">Number of people speaking
+        <input type="number" id="f-speakers" min="1" max="30" placeholder="Not sure">
+        <small>If you know it, the voices are split more accurately.</small>
       </label>
       <label class="field field-wide">Transcription model
         <select id="f-model"></select>

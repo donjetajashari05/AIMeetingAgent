@@ -680,3 +680,20 @@ details.sources ul { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4p
 
 .voice-sample { display: grid; gap: 6px; margin-top: 8px; padding: 10px; border: 1px dashed var(--line); border-radius: 10px; }
 .voice-sample .row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Voice recognition page */
+.voice-row { align-items: flex-start; }
+.voice-row .row { margin-top: 6px; }
+.voice-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.voice-result { display: grid; gap: 8px; margin-top: 10px; }
+.voice-hit { color: var(--green); font-size: 1.1em; }
+.voice-bars { display: grid; gap: 4px; max-width: 520px; }
+.voice-bar { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 44px; gap: 8px; align-items: center; }
+.voice-bar .bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.voice-bar .fill { display: block; height: 100%; background: var(--subtle, #999); }
+.voice-bar .fill.ok { background: var(--green); }
+
+/* Upload dialog: what the meeting is for comes first; the dialog scrolls, the buttons stay visible */
+.dialog { overflow-y: auto; }
+.upload-top { padding: 14px; border-radius: 16px; background: var(--surface-2, rgba(127,127,127,0.06)); }
+#upload-form .dialog-actions { position: sticky; bottom: 0; background: var(--surface); padding: 12px 0 0; }

@@ -99,13 +99,14 @@ def rows(cursor):
 # ---------- Meetings ----------
 
 def create_meeting(title, meeting_date, source, file_path, model, language_hint, team_id=None, project_id=None,
-                   created_by=None, kind="meeting"):
+                   created_by=None, kind="meeting", speakers_hint=None):
     with connect() as c:
         cur = c.execute(
             "INSERT INTO meetings (title, meeting_date, created_at, source, file_path, model, "
-            "language_hint, status, team_id, project_id, created_by, kind) VALUES (?,?,?,?,?,?,?, 'queued', ?, ?, ?, ?)",
+            "language_hint, status, team_id, project_id, created_by, kind, speakers_hint) "
+            "VALUES (?,?,?,?,?,?,?, 'queued', ?, ?, ?, ?, ?)",
             (title, meeting_date, now(), source, file_path, model, language_hint, team_id, project_id, created_by,
-             kind if kind in ("meeting", "standup") else "meeting"),
+             kind if kind in ("meeting", "standup") else "meeting", speakers_hint),
         )
         return cur.lastrowid
 

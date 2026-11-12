@@ -292,6 +292,7 @@ async function route() {
     else if (name === 'team' && isAdmin()) await renderTeam();
     else if (name === 'outbox' && isAdmin()) await renderOutbox();
     else if (name === 'security' && isAdmin()) await renderSecurity();
+    else if (name === 'voices' && isAdmin()) await renderVoices();
     else if (name === 'vocabulary' && isAdmin()) await renderVocabulary();
     else await renderHome();
   } catch (e) {
@@ -1327,11 +1328,30 @@ function buildPlayer(m, lines, startAt) {
   };
   const seek = (t) => { audio.currentTime = Math.max(0, Math.min(t, dur())); audio.play().catch(() => {}); paint(); };
 
-  playBtn.addEventListener('click', () => (audio.paused ? audio.play().catch((e) => toast(`Could not play the audio: ${e.message}`)) : audio.pause()));
+  const src = `/api/meetings/${m.id}/audio`;
+  // Why the audio can't play: ask the server what it answers for the file
+  const explain = async () => {
+    try {
+      const r = await fetch(src, { headers: { Range: 'bytes=0-1' } });
+      if (r.status === 401) { showLogin(); return 'Please sign in again.'; }
+      if (!r.ok) { const d = await r.json().catch(() => null); return (d && d.detail) || `The server answered ${r.status}.`; }
+      return `The browser can’t play this file (${r.headers.get('content-type') || 'unknown type'}). Try Chrome or Edge.`;
+    } catch { return 'The app server is not reachable. Is it running?'; }
+  };
+  playBtn.addEventListener('click', async () => {
+    if (!audio.paused) { audio.pause(); return; }
+    if (!audio.getAttribute('src')) { audio.src = src; audio.load(); }  // the source was released: load it again
+    try { await audio.play(); }
+    catch (e) {
+      if (e.name === 'NotAllowedError') { toast('The browser blocked playback. Click play again.'); return; }
+      audio.src = src; audio.load();  // one retry with a fresh request
+      try { await audio.play(); } catch { toast(`Could not play the audio. ${await explain()}`); }
+    }
+  });
   audio.addEventListener('play', setIcon);
   audio.addEventListener('pause', setIcon);
   audio.addEventListener('timeupdate', paint);
-  audio.addEventListener('error', () => toast('The audio was not found or can’t be played in the browser.'));
+  audio.addEventListener('error', async () => { if (audio.getAttribute('src')) toast(`The audio can’t be loaded. ${await explain()}`); });
   wave.addEventListener('click', (e) => { const r = wave.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * dur()); });
   wave.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight') { e.preventDefault(); seek(audio.currentTime + 5); }
@@ -1497,27 +1517,18 @@ function employeeForm(emp, reload) {
   });
 }
 
-/** Record (or upload) 20-60 s of the person speaking alone, so their name shows from the first meeting. */
-function voiceSampleBox(emp, reload) {
-  const status = el('span', { class: 'small subtle' });
-  const recBtn = el('button', { type: 'button', class: 'btn btn-sm' }, 'Record voice sample');
+/** A record button + an upload button. send(blob, filename) gets the audio; minSecs guards short takes. */
+function voiceRecorder({ label, minSecs, hint, send, status }) {
+  const recBtn = el('button', { type: 'button', class: 'btn btn-sm' }, icon('mic', 16, 2), label);
   const fileIn = el('input', { type: 'file', accept: 'audio/*,.mp3,.wav,.m4a,.webm,.ogg,.flac,.aac', style: { display: 'none' } });
   const upBtn = el('button', { type: 'button', class: 'btn btn-sm', onclick: () => fileIn.click() }, 'Upload a recording');
   let r = null;
-  const send = async (blob, name) => {
+  const go = async (blob, name) => {
     recBtn.disabled = upBtn.disabled = true;
-    status.textContent = 'Learning the voice… this can take a minute.';
-    try {
-      const fd = new FormData();
-      fd.append('file', blob, name);
-      const res = await api(`/api/employees/${emp.id}/voice`, { method: 'POST', body: fd });
-      status.textContent = `Voice learned from ${res.seconds} s of speech. ${emp.full_name}’s name now shows automatically in new meetings.`;
-      toast('Voice sample saved.');
-      reload();
-    } catch (err) { status.textContent = err.message; }
-    finally { recBtn.disabled = upBtn.disabled = false; }
+    try { await send(blob, name); } catch (err) { status.textContent = err.message; }
+    finally { recBtn.disabled = upBtn.disabled = false; fileIn.value = ''; }
   };
-  fileIn.addEventListener('change', () => fileIn.files[0] && send(fileIn.files[0], fileIn.files[0].name));
+  fileIn.addEventListener('change', () => fileIn.files[0] && go(fileIn.files[0], fileIn.files[0].name));
   recBtn.addEventListener('click', async () => {
     if (r) { r.recorder.stop(); return; }
     let stream;
@@ -1531,17 +1542,105 @@ function voiceSampleBox(emp, reload) {
       stream.getTracks().forEach((t) => t.stop());
       const secs = (Date.now() - r.started) / 1000, chunks = r.chunks, mime = r.recorder.mimeType;
       r = null;
-      recBtn.textContent = 'Record voice sample';
-      if (secs < 12) { status.textContent = 'Too short: record at least 20–30 seconds.'; return; }
-      send(new Blob(chunks, { type: mime }), `sample.${(mime || '').includes('ogg') ? 'ogg' : 'webm'}`);
+      recBtn.replaceChildren(icon('mic', 16, 2), label);
+      recBtn.classList.remove('btn-primary');
+      if (secs < minSecs) { status.textContent = `Too short: record at least ${minSecs} seconds.`; return; }
+      go(new Blob(chunks, { type: mime }), `voice.${(mime || '').includes('ogg') ? 'ogg' : 'webm'}`);
     };
     r.recorder.start(1000);
-    recBtn.textContent = 'Stop';
-    r.timer = setInterval(() => { status.textContent = `Recording… ${fmtClock((Date.now() - r.started) / 1000)}. Ask ${emp.full_name} to talk normally about their work for 30 seconds, alone.`; }, 500);
+    recBtn.replaceChildren('■ Stop');
+    recBtn.classList.add('btn-primary');
+    const tick = () => { status.textContent = `Recording… ${fmtClock((Date.now() - r.started) / 1000)}. ${hint}`; };
+    tick();
+    r.timer = setInterval(tick, 500);
   });
+  return el('div', { class: 'row' }, recBtn, upBtn, fileIn);
+}
+
+/** Record (or upload) 20-60 s of the person speaking alone, so their name shows from the first meeting. */
+function voiceSampleBox(emp, reload) {
+  const status = el('span', { class: 'small subtle' });
+  const send = async (blob, name) => {
+    status.textContent = 'Learning the voice… this can take a minute.';
+    const fd = new FormData();
+    fd.append('file', blob, name);
+    const res = await api(`/api/employees/${emp.id}/voice`, { method: 'POST', body: fd });
+    status.textContent = `Voice learned from ${res.seconds} s of speech. ${emp.full_name}’s name now shows automatically in new meetings.`;
+    toast(`${emp.full_name}: voice saved.`);
+    reload();
+  };
   return el('div', { class: 'voice-sample' },
-    el('small', { text: `Voice sample: ${emp.full_name} talks alone for 20–60 seconds (about their work, in their usual voice). Then their name shows in transcripts from the first meeting. The recording itself is deleted right after; only the fingerprint is kept.` }),
-    el('div', { class: 'row' }, recBtn, upBtn, fileIn), status);
+    el('small', { text: `${emp.full_name} talks alone for 20–60 seconds (about their work, in their usual voice). The recording is deleted right after; only the fingerprint is kept.` }),
+    voiceRecorder({ label: 'Record voice sample', minSecs: 12, status, send,
+      hint: `Ask ${emp.full_name} to talk normally about their work for 30 seconds, alone. Press Stop when done.` }),
+    status);
+}
+
+/* ================= Voice recognition (Settings) ================= */
+
+async function renderVoices() {
+  await loadOrg();
+  const people = state.org.employees.filter((e) => e.active).sort((a, b) => a.full_name.localeCompare(b.full_name));
+  const ready = people.filter((e) => e.voice_samples > 0).length;
+  const reload = () => renderVoices();
+
+  // Test: someone speaks for a few seconds, the app says who it thinks it is
+  const testStatus = el('div', { class: 'voice-result' });
+  const testSend = async (blob, name) => {
+    testStatus.replaceChildren(el('span', { class: 'small subtle', text: 'Listening… this can take a minute.' }));
+    const fd = new FormData();
+    fd.append('file', blob, name);
+    const r = await api('/api/voices/test', { method: 'POST', body: fd });
+    testStatus.replaceChildren(
+      r.name ? el('strong', { class: 'voice-hit', text: `This is ${r.name}` })
+        : el('strong', { text: r.profiles ? 'Not recognized: no voice is similar enough.' : 'No voices saved yet: add a sample for someone first.' }),
+      r.ranked.length ? el('div', { class: 'voice-bars' }, r.ranked.map((x) => el('div', { class: 'voice-bar' },
+        el('span', { text: x.name }),
+        el('span', { class: 'bar' }, el('span', { class: x.similarity >= r.threshold ? 'fill ok' : 'fill', style: { width: `${Math.max(0, Math.round(x.similarity * 100))}%` } })),
+        el('span', { class: 'small', text: `${Math.round(x.similarity * 100)}%` })))) : null,
+      el('span', { class: 'small subtle', text: `Named automatically from ${Math.round(r.threshold * 100)}% similarity. Heard ${r.seconds} s of speech. Nothing from this test is saved.` }));
+  };
+
+  const rows = people.map((e) => {
+    const status = el('span', { class: 'small subtle' });
+    const send = async (blob, name) => {
+      status.textContent = 'Learning the voice… this can take a minute.';
+      const fd = new FormData();
+      fd.append('file', blob, name);
+      const res = await api(`/api/employees/${e.id}/voice`, { method: 'POST', body: fd });
+      toast(`${e.full_name}: voice saved from ${res.seconds} s of speech.`);
+      reload();
+    };
+    const state_ = !e.voice_consent_at ? el('span', { class: 'status', text: 'No consent' })
+      : e.voice_samples ? el('span', { class: 'status done', text: `Ready · ${e.voice_samples} sample${e.voice_samples === 1 ? '' : 's'}` })
+        : el('span', { class: 'status warn', text: 'No voice yet' });
+    return el('div', { class: 'outbox-row voice-row' },
+      el('span', { class: 'avatar', text: initials(e.full_name) }),
+      el('div', { class: 'grow' },
+        el('strong', { text: e.full_name, style: { color: 'var(--heading)' } }),
+        e.role ? el('span', { class: 'small subtle', text: e.role }) : null,
+        e.voice_consent_at
+          ? voiceRecorder({ label: e.voice_samples ? 'Add another sample' : 'Record voice', minSecs: 12, status, send,
+            hint: `${e.full_name} talks alone, normally, for about 30 seconds. Press Stop when done.` })
+          : el('span', { class: 'small subtle', text: 'Needs the person’s agreement first: Edit → “Agreed to be recognized by voice”.' }),
+        status),
+      el('div', { class: 'voice-side' }, state_,
+        el('button', { type: 'button', class: 'btn btn-sm', onclick: () => employeeForm(e, reload) }, 'Edit')));
+  });
+
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('Settings', 'Voice recognition'),
+    el('p', { class: 'muted', text: 'Each person records about 30 seconds of their voice once. After that their name appears in meeting transcripts by itself, instead of “Folësi 1, 2…”.' }),
+    el('section', { class: 'card' },
+      el('h2', { text: 'Try it' }),
+      el('p', { class: 'small muted', text: 'Someone whose voice is saved speaks for 5–15 seconds. The app says who it thinks it is.' }),
+      voiceRecorder({ label: 'Record a test', minSecs: 5, status: testStatus, send: testSend,
+        hint: 'Talk normally for 5–15 seconds, then press Stop.' }),
+      testStatus),
+    el('section', { class: 'card', style: { gap: 0 } },
+      el('h2', { text: `People (${ready} of ${people.length} ready)` }),
+      people.length ? rows : el('div', { class: 'empty' }, el('strong', { text: 'No people yet' }), 'Add people on the Team page first.')),
+    el('p', { class: 'small subtle', text: 'Only a voice fingerprint is kept (numbers, not a recording), on this computer, and only for people who agreed. Every sample and test is in the Security log.' })));
 }
 
 /** kind = 'team' | 'project'. For a new project, `presetTeamId` picks its team. */
@@ -1573,7 +1672,7 @@ function groupForm(kind, group, reload, presetTeamId = null) {
       const t = byId(state.org.teams, Number(team.value));
       const keepPm = pmSel.value || (g.pm_id ? String(g.pm_id) : '');
       pmSel.replaceChildren(el('option', { value: '', text: t ? 'No PM' : 'Choose the team first' }),
-        (t ? people(t.member_ids) : []).map((p) => el('option', { value: p.id, text: p.label, selected: String(p.id) === keepPm })));
+        ...(t ? people(t.member_ids) : []).map((p) => el('option', { value: String(p.id), text: p.label, selected: String(p.id) === keepPm })));
     }
     membersSlot.replaceWith(membersSlot = field('Members', members, {
       hint: kind === 'team'
@@ -2164,14 +2263,21 @@ async function renderVocabulary() {
 /** Who is "Folësi 2"? The PM picks the person; if they agreed, their voice is learned. */
 function speakerForm(m, s) {
   const people = state.org.employees.filter((e) => e.active);
+  const typed = !s.employee_id && s.name !== s.label;  // a name typed earlier (someone not on the team)
   const sel = el('select', { required: false },
     el('option', { value: '', text: `— Unknown (${s.label}) —` }),
     people.map((e) => el('option', { value: String(e.id), selected: e.id === s.employee_id,
-      text: e.full_name + (isAdmin() ? (e.voice_consent_at ? ' · voice ✓' : ' · no voice consent') : '') })));
+      text: e.full_name + (isAdmin() ? (e.voice_consent_at ? ' · voice ✓' : ' · no voice consent') : '') })),
+    el('option', { value: 'other', selected: typed, text: '✎ Someone else: type the name…' }));
+  const other = el('input', { type: 'text', maxlength: '100', value: typed ? s.name : '', placeholder: 'e.g. a guest or a client' });
+  const otherField = field('Name', other);
   const hint = el('p', { class: 'small subtle' });
   const paint = () => {
     const e = people.find((x) => String(x.id) === sel.value);
-    hint.textContent = !e ? 'The speaker stays unnamed.'
+    otherField.style.display = sel.value === 'other' ? '' : 'none';
+    hint.textContent = sel.value === 'other'
+      ? 'Only the name is shown. To be recognized by voice next time, the person must be on the team (Settings → Team).'
+      : !e ? 'The speaker stays unnamed.'
       : e.voice_consent_at ? `${e.full_name}’s voice is learned from this meeting, so next time they are recognized automatically.`
         : `Only the name is set. ${e.full_name} hasn’t agreed to voice recognition, so the voice is not saved (Settings → Team).`;
   };
@@ -2179,12 +2285,14 @@ function speakerForm(m, s) {
   paint();
   openForm(`Who is ${s.label}?`, [
     el('p', { class: 'small muted', text: 'Listen to a few of their lines in the transcript, then choose the person. Their tasks from this meeting move to them too.' }),
-    field('Person', sel), hint,
+    field('Person', sel), otherField, hint,
   ], {
     saveText: 'Save',
     onSave: async () => {
+      const isOther = sel.value === 'other';
+      if (isOther && !other.value.trim()) throw new Error('Type the name.');
       const r = await api(`/api/meetings/${m.id}/speakers/${encodeURIComponent(s.label)}`, { method: 'PUT',
-        body: JSON.stringify({ employee_id: sel.value ? Number(sel.value) : null }) });
+        body: JSON.stringify(isOther ? { name: other.value.trim() } : { employee_id: sel.value ? Number(sel.value) : null }) });
       toast(r.learned ? `${s.label} is ${r.name}. Voice learned: next time it’s automatic. Use “Analyze again” so the AI uses the name.`
         : `${s.label} is ${r.name}.`);
       await renderMeeting(m.id);
@@ -2419,7 +2527,8 @@ const AUDIT = {
   'team.delete': ['Deleted team', 'warn'], 'project.add': ['Added project', 'work'], 'project.edit': ['Changed project (PM / Jira key)', 'work'],
   'project.delete': ['Deleted project', 'warn'],
   'voice.consent_given': ['Voice consent recorded', 'warn'], 'voice.consent_withdrawn': ['Voice consent withdrawn', 'warn'],
-  'voice.profile_delete': ['Deleted voice profile', 'warn'], 'voice.enrolled': ['Added a voice sample', 'warn'], 'voice.speaker_named': ['Named a speaker', 'work'],
+  'voice.profile_delete': ['Deleted voice profile', 'warn'], 'voice.enrolled': ['Added a voice sample', 'warn'],
+  'voice.test': ['Tested voice recognition', 'work'], 'voice.speaker_named': ['Named a speaker', 'work'],
 };
 
 async function renderSecurity() {
@@ -2509,14 +2618,18 @@ function fillMeetingGroups() {
   const paintProjects = () => {
     const tid = Number(teamSel.value) || null;
     const keep = projSel.value;
-    const groups = teams.filter((t) => !tid || t.id === tid).map((t) => [t, projects.filter((p) => p.team_id === t.id)]).filter(([, ps]) => ps.length);
-    projSel.replaceChildren(
+    const groups = teams.filter((t) => !tid || t.id === tid).map((t) => [t, projects.filter((p) => Number(p.team_id) === Number(t.id))]).filter(([, ps]) => ps.length);
+    // Projects whose team isn't in the list still show (never an empty list when projects exist)
+    const loose = tid ? [] : projects.filter((p) => !teams.some((t) => Number(t.id) === Number(p.team_id)));
+    const opt = (p) => el('option', { value: String(p.id), text: p.name, selected: String(p.id) === keep });
+    projSel.replaceChildren(...nn(
       el('option', { value: '', text: !isAdmin() ? 'Choose the project…' : projects.length ? 'No project' : 'Add on the “Team” page' }),
-      groups.map(([t, ps]) => el('optgroup', { label: t.name }, ps.map((p) => el('option', { value: p.id, text: p.name, selected: String(p.id) === keep })))));
+      groups.map(([t, ps]) => el('optgroup', { label: t.name }, ps.map(opt))),
+      loose.length ? el('optgroup', { label: 'Other' }, loose.map(opt)) : null));
   };
-  teamSel.replaceChildren(
+  teamSel.replaceChildren(...nn(
     el('option', { value: '', text: teams.length ? 'No team' : 'Add on the “Team” page' }),
-    teams.map((t) => el('option', { value: t.id, text: t.name, selected: String(t.id) === keepTeam })));
+    teams.map((t) => el('option', { value: String(t.id), text: t.name, selected: String(t.id) === keepTeam }))));
   teamSel.onchange = paintProjects;
   projSel.onchange = () => {
     const p = byId(projects, Number(projSel.value));
@@ -2539,8 +2652,8 @@ function openUpload(startMode = 'file', kind = 'meeting') {
   };
   kindSel.onchange = paintKind;
   paintKind();
-  fillMeetingGroups();
-  loadOrg().then(fillMeetingGroups).catch(() => {});
+  if (state.org) fillMeetingGroups();
+  loadOrg().then(fillMeetingGroups).catch((e) => { errBox.textContent = `Could not load the teams and projects: ${e.message}`; });
   const sel = document.getElementById('f-model');
   sel.replaceChildren(...state.status.models.map((m) => el('option', { value: m, text: m, selected: m === state.status.default_model })));
   document.getElementById('f-model-hint').textContent = state.status.gpu
@@ -2613,6 +2726,8 @@ form.addEventListener('submit', async (e) => {
   fd.append('source', mode === 'record' ? 'recording' : 'audio');
   const kind = document.getElementById('f-kind').value;
   fd.append('kind', kind);
+  const speakers = Number(document.getElementById('f-speakers').value);
+  if (speakers >= 1 && speakers <= 30) fd.append('speakers', String(speakers));
   for (const [key, id] of [['team_id', 'f-team'], ['project_id', 'f-project']]) {
     const v = document.getElementById(id).value;
     if (v) fd.append(key, v);

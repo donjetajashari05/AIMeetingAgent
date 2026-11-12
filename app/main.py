@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -186,6 +186,7 @@ async def create_meeting(
     team_id: int | None = Form(None),
     project_id: int | None = Form(None),
     kind: str = Form("meeting"),        # meeting | standup (daily standup: a report per person, no tasks)
+    speakers: int | None = Form(None),  # how many people spoke, if known
     user=User,
 ):
     # Admins add any meeting; a PM only for the projects they manage
@@ -228,7 +229,8 @@ async def create_meeting(
             or Path(file.filename or "Meeting").stem or "Meeting")
     meeting_id = db.create_meeting(name[:200], mdate.isoformat(), kind, str(dest), model,
                                    language if language in ("sq", "en") else None,
-                                   team_id or None, project_id or None, created_by=user["id"], kind=standup_kind)
+                                   team_id or None, project_id or None, created_by=user["id"], kind=standup_kind,
+                                   speakers_hint=speakers if speakers and 1 <= speakers <= 30 else None)
     pipeline.enqueue(meeting_id)
     return {"id": meeting_id}
 
@@ -944,6 +946,33 @@ async def enroll_voice(employee_id: int, request: Request, file: UploadFile = Fi
     return {"ok": True, "seconds": round(seconds), "samples": samples}
 
 
+@app.post("/api/voices/test")
+async def test_voice(request: Request, file: UploadFile = File(...), user=User):
+    """Record someone for a few seconds: who does the system think it is? Nothing is stored."""
+    auth.require_admin(user)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in AUDIO_EXT:
+        raise HTTPException(400, "Unknown format. Use mp3, wav, m4a, webm, ogg, mp4, flac or aac.")
+    dest = UPLOAD_DIR / f"voicetest-{uuid.uuid4().hex}{ext}"
+    try:
+        size = 0
+        with open(dest, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 50 * 1024 * 1024:
+                    raise HTTPException(413, "The recording is too large: 10-20 seconds is enough.")
+                out.write(chunk)
+        try:
+            vec, seconds = await run_in_threadpool(voices.sample_fingerprint, dest, 4)
+        except voices.VoiceError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        dest.unlink(missing_ok=True)  # the recording is never kept
+    r = voices.test(vec)
+    security.log("voice.test", request, user, detail=f"result: {r['name'] or 'not recognized'}")
+    return {**r, "seconds": round(seconds)}
+
+
 @app.delete("/api/employees/{employee_id}/voice")
 def delete_voice(employee_id: int, request: Request, user=User):
     """Delete the person's voice profile (it is learned again only from new namings)."""
@@ -955,6 +984,7 @@ def delete_voice(employee_id: int, request: Request, user=User):
 
 class SpeakerIn(BaseModel):
     employee_id: int | None = None  # None = unknown again ("Folësi N")
+    name: str | None = Field(None, max_length=100)  # someone not on the team: just a name, no voice learned
 
 
 @app.put("/api/meetings/{meeting_id}/speakers/{label}")
@@ -964,7 +994,7 @@ def name_speaker(meeting_id: int, label: str, body: SpeakerIn, request: Request,
     if m["status"] in BUSY:
         raise HTTPException(409, "Wait until processing finishes.")
     try:
-        r = voices.name_speaker(meeting_id, label, body.employee_id)
+        r = voices.name_speaker(meeting_id, label, body.employee_id, name=body.name)
     except voices.VoiceError as e:
         raise HTTPException(400, str(e))
     security.log("voice.speaker_named", request, user, target=f"{meeting_id}:{label}",

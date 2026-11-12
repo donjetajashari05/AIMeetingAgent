@@ -9,3 +9,4 @@ data/app.db*
 data/uploads/
 data/*.jsonl
 data/*.log
+models/

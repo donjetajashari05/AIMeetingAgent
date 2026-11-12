@@ -109,7 +109,7 @@ def _transcribe(meeting_id, m):
     glossary, people, projects = _context(m)
     data = transcriber.transcribe_audio(
         m["file_path"], model_name=m["model"], language=m["language_hint"] or None,
-        diarize=has_hf_token(), diarize_required=False,
+        diarize=has_hf_token(), diarize_required=False, num_speakers=m.get("speakers_hint") or None,
         on_info=on_info, on_segment=on_segment, on_diarize=on_diarize,
         initial_prompt=vocab.whisper_prompt(glossary, people, projects),
         hotwords=vocab.hotwords(glossary, people, projects),
