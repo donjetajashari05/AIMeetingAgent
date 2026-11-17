@@ -6,9 +6,34 @@ accepting the model terms at:
     https://huggingface.co/pyannote/speaker-diarization-community-1
 """
 import os
+import threading
+from functools import lru_cache
 
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 SAMPLE_RATE = 16000
+_LOCK = threading.Lock()
+
+
+def preload():
+    """Load the pipeline ahead of the first meeting (called in the background at server start)."""
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        _pipeline(token)
+
+
+@lru_cache(maxsize=1)
+def _pipeline(token):
+    """Load the pyannote pipeline once per server run (loading takes ~30-40 s on a laptop CPU)."""
+    import torch
+    from pyannote.audio import Pipeline
+
+    pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=token)
+    if pipeline is None:
+        raise SystemExit(f"Could not load {DIARIZATION_MODEL}. "
+                         "Check that you accepted the model terms on HuggingFace.")
+    if torch.cuda.is_available():
+        pipeline.to(torch.device("cuda"))
+    return pipeline
 
 
 def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None, with_embeddings=False):
@@ -36,24 +61,20 @@ def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None,
             "environment (e.g. Google Colab) or run transcription without --diarize."
         )
 
-    pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL, token=token)
-    if pipeline is None:
-        raise SystemExit(f"Could not load {DIARIZATION_MODEL}. "
-                         "Check that you accepted the model terms on HuggingFace.")
-    if torch.cuda.is_available():
-        pipeline.to(torch.device("cuda"))
+    pipeline = _pipeline(token)
 
     # Decode with faster-whisper (PyAV) and pass the waveform in memory, so we
     # don't depend on torchcodec/FFmpeg DLLs, which often fail on Windows.
     audio = decode_audio(audio_path, sampling_rate=SAMPLE_RATE)
     waveform = torch.from_numpy(audio).unsqueeze(0)
 
-    output = pipeline(
-        {"waveform": waveform, "sample_rate": SAMPLE_RATE},
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-    )
+    with _LOCK:  # one pipeline is shared: a meeting and a voice sample never run it at the same time
+        output = pipeline(
+            {"waveform": waveform, "sample_rate": SAMPLE_RATE},
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
     # The "exclusive" version has no overlapping turns, which suits transcripts better.
     annotation = getattr(output, "exclusive_speaker_diarization", output)
 

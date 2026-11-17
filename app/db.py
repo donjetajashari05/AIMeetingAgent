@@ -217,10 +217,10 @@ def save_notes(meeting_id, notes):
             if dedupe.best_match(t["description"], kept, t["assignee"]):
                 continue  # already confirmed/sent (or made into a ticket) as the same work
             c.execute(
-                "INSERT INTO tasks (meeting_id, description, assignee, due_date, due_date_text, quote, created_at, "
-                "priority, priority_reason, estimate_hours) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (meeting_id, t["description"], t["assignee"], t["due_date"], t["due_date_text"], t["quote"], now(),
-                 check_priority(t.get("priority")), t.get("priority_reason"), check_estimate(t.get("estimate_hours"))),
+                "INSERT INTO tasks (meeting_id, description, details, assignee, due_date, due_date_text, quote, created_at, "
+                "priority, priority_reason, estimate_hours) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (meeting_id, t["description"], t.get("details"), t["assignee"], t["due_date"], t["due_date_text"], t["quote"],
+                 now(), check_priority(t.get("priority")), t.get("priority_reason"), check_estimate(t.get("estimate_hours"))),
             )
         index = [(notes["summary"], meeting_id, "summary", None, None)]
         index += [(f"{tp['title']}: {tp['summary']}", meeting_id, "summary", None, None) for tp in notes.get("topics") or []]
@@ -308,11 +308,12 @@ MANUAL_TITLE = "Written tickets"
 
 def manual_holder(project_id, user_id):
     """Tickets the PM writes by hand (no meeting) hang on a hidden "meeting" with source 'manual',
-    one per project, so they get the project, permissions and Jira key like any other ticket.
-    It never shows in the meetings list."""
+    one per project (one per PM for tickets without a project), so they get the project, permissions
+    and Jira key like any other ticket. It never shows in the meetings list."""
     with connect() as c:
-        r = c.execute("SELECT id FROM meetings WHERE source = 'manual' AND project_id IS ? ORDER BY id LIMIT 1",
-                      (project_id,)).fetchone()
+        r = c.execute("SELECT id FROM meetings WHERE source = 'manual' AND project_id IS ? "
+                      "AND (project_id IS NOT NULL OR created_by IS ?) ORDER BY id LIMIT 1",
+                      (project_id, user_id)).fetchone()
         if r:
             return r[0]
         return c.execute(

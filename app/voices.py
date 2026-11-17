@@ -23,12 +23,18 @@ VOICE_MATCH_THRESHOLD (.env, default 0.6): how similar (cosine, 0..1) a voice mu
 profile to be named automatically. Raise it if people get mixed up, lower it if known people
 stay "Folësi N".
 """
+import base64
+import hashlib
+import hmac
+import json
 import os
+import secrets
 import sys
 
 import numpy as np
 
 from . import db
+from .org import EMAIL_RE
 
 if str(db.ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(db.ROOT / "scripts"))
@@ -332,3 +338,136 @@ def summary():
         rows = c.execute("""SELECT e.id, e.voice_consent_at, p.samples FROM employees e
                             LEFT JOIN voice_profiles p ON p.employee_id = e.id""").fetchall()
     return {r["id"]: {"voice_consent_at": r["voice_consent_at"], "voice_samples": r["samples"] or 0} for r in rows}
+
+
+# ---------- Moving voices to another PM's laptop ----------
+# Each PM runs the app on their own laptop with their own database. The voices learned on one
+# laptop are carried to another in a file encrypted with a passphrase (the fingerprints are
+# biometric data: the file is useless without the passphrase, and any change to it is detected).
+# People are matched by their work email, because employee ids differ from one database to another.
+# Encryption (stdlib only): scrypt(passphrase, salt) -> two keys; HMAC-SHA256 in counter mode as
+# the keystream, and an HMAC-SHA256 tag over salt, nonce and ciphertext (encrypt-then-MAC).
+
+EXPORT_HEADER = "SYNCUP-VOICES-1\n"
+MIN_PASSPHRASE = 12
+MAX_EXPORT_BYTES = 2 * 1024 * 1024
+
+
+def _export_keys(passphrase, salt):
+    k = hashlib.scrypt(passphrase.encode(), salt=salt, n=2 ** 15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=64)
+    return k[:32], k[32:]
+
+
+def _keystream(key, nonce, n):
+    out = bytearray()
+    counter = 0
+    while len(out) < n:
+        out += hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        counter += 1
+    return bytes(out[:n])
+
+
+def _check_passphrase(passphrase):
+    if len(passphrase or "") < MIN_PASSPHRASE:
+        raise VoiceError(f"The passphrase must be at least {MIN_PASSPHRASE} characters.")
+
+
+def export_profiles(passphrase):
+    """Every voice profile of a person who agreed and has an email, as an encrypted text file.
+    Returns (file text, how many people)."""
+    _check_passphrase(passphrase)
+    with db.connect() as c:
+        rows = c.execute("""
+            SELECT e.full_name, e.email, e.role, e.aliases, e.voice_consent_at, p.embedding, p.samples
+            FROM voice_profiles p JOIN employees e ON e.id = p.employee_id
+            WHERE e.voice_consent_at IS NOT NULL AND e.email IS NOT NULL AND e.email != ''
+            ORDER BY e.full_name""").fetchall()
+    if not rows:
+        raise VoiceError("There are no voices to export: nobody with consent and an email has a voice yet.")
+    payload = json.dumps({
+        "version": 1, "exported_at": db.now(),
+        "people": [{"full_name": r["full_name"], "email": r["email"].lower(), "role": r["role"], "aliases": r["aliases"],
+                    "consent_at": r["voice_consent_at"], "samples": r["samples"],
+                    "embedding": base64.b64encode(r["embedding"]).decode()} for r in rows],
+    }, ensure_ascii=False).encode()
+    salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
+    enc, mac = _export_keys(passphrase, salt)
+    ct = bytes(a ^ b for a, b in zip(payload, _keystream(enc, nonce, len(payload))))
+    tag = hmac.new(mac, salt + nonce + ct, hashlib.sha256).digest()
+    return EXPORT_HEADER + base64.b64encode(salt + nonce + tag + ct).decode() + "\n", len(rows)
+
+
+def _clean_person(p, dim):
+    """One person from an import file, checked; raises VoiceError when it is not usable."""
+    email = str(p.get("email") or "").strip().lower()
+    if not EMAIL_RE.match(email) or len(email) > 200:
+        raise VoiceError("no valid email")
+    name = " ".join(str(p.get("full_name") or "").split())[:200]
+    if not name:
+        raise VoiceError("no name")
+    vec = np.frombuffer(base64.b64decode(str(p.get("embedding") or ""), validate=True), dtype=np.float32)
+    if not 64 <= vec.size <= 4096 or (dim and vec.size != dim) or not np.all(np.isfinite(vec)) or not np.any(vec):
+        raise VoiceError("the voice fingerprint is not valid for this app")
+    samples = p.get("samples")
+    if not isinstance(samples, int) or not 1 <= samples <= 100000:
+        raise VoiceError("the number of samples is not valid")
+    clip = lambda v, n: (" ".join(str(v).split())[:n] or None) if v else None  # noqa: E731
+    return {"email": email, "full_name": name, "role": clip(p.get("role"), 200), "aliases": clip(p.get("aliases"), 300),
+            "consent_at": clip(p.get("consent_at"), 40) or db.now(), "samples": samples, "vec": _norm(vec)}
+
+
+def import_profiles(text, passphrase, by_user_id):
+    """Add the voices of an export file to this laptop. A person missing here is added to the
+    employee list. An existing voice is replaced only when the file's voice was learned from more
+    samples (so importing the same file twice changes nothing).
+    Returns {"imported", "created", "kept", "skipped": [...]}."""
+    _check_passphrase(passphrase)
+    if not text.startswith(EXPORT_HEADER):
+        raise VoiceError("This is not a SyncUp voices file.")
+    try:
+        raw = base64.b64decode(text[len(EXPORT_HEADER):].strip(), validate=True)
+    except ValueError:
+        raise VoiceError("The file is damaged.")
+    if len(raw) < 80:
+        raise VoiceError("The file is damaged.")
+    salt, nonce, tag, ct = raw[:16], raw[16:32], raw[32:64], raw[64:]
+    enc, mac = _export_keys(passphrase, salt)
+    if not hmac.compare_digest(tag, hmac.new(mac, salt + nonce + ct, hashlib.sha256).digest()):
+        raise VoiceError("Wrong passphrase, or the file was changed.")
+    try:
+        data = json.loads(bytes(a ^ b for a, b in zip(ct, _keystream(enc, nonce, len(ct)))).decode())
+        people = data["people"]
+        assert data.get("version") == 1 and isinstance(people, list) and len(people) <= 5000
+    except Exception:
+        raise VoiceError("The file can't be read by this version of the app.")
+
+    out = {"imported": 0, "created": 0, "kept": 0, "skipped": []}
+    with db.connect() as c:
+        have = c.execute("SELECT embedding FROM voice_profiles LIMIT 1").fetchone()
+        dim = _vec(have["embedding"]).size if have else None
+        for p in people:
+            try:
+                p = _clean_person(p if isinstance(p, dict) else {}, dim)
+            except (VoiceError, ValueError) as e:
+                out["skipped"].append(f"{str((p or {}).get('email') or '?')[:80] if isinstance(p, dict) else '?'}: {e}")
+                continue
+            dim = dim or p["vec"].size
+            emp = c.execute("SELECT id, voice_consent_at FROM employees WHERE email = ? COLLATE NOCASE", (p["email"],)).fetchone()
+            if emp:
+                emp_id = emp["id"]
+            else:
+                emp_id = c.execute("INSERT INTO employees (full_name, email, role, aliases, active, created_at) VALUES (?,?,?,?,1,?)",
+                                   (p["full_name"], p["email"], p["role"], p["aliases"], db.now())).lastrowid
+                out["created"] += 1
+            if not (emp and emp["voice_consent_at"]):
+                # The person agreed (on the exporting PM's laptop, at that date)
+                c.execute("UPDATE employees SET voice_consent_at = ?, voice_consent_by = ? WHERE id = ?",
+                          (p["consent_at"], by_user_id, emp_id))
+            cur = c.execute("SELECT samples FROM voice_profiles WHERE employee_id = ?", (emp_id,)).fetchone()
+            if cur and cur["samples"] >= p["samples"]:
+                out["kept"] += 1  # this laptop already knows the voice at least as well
+                continue
+            c.execute("INSERT OR REPLACE INTO voice_profiles (employee_id, embedding, samples, updated_at) VALUES (?,?,?,?)",
+                      (emp_id, p["vec"].astype(np.float32).tobytes(), p["samples"], db.now()))
+            out["imported"] += 1
+    return out

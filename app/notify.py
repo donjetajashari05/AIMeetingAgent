@@ -49,12 +49,11 @@ def meeting_processed(meeting_id):
              f"The meeting “{m['title']}” ({m['meeting_date']}) of the {project} project has been processed.",
              "SUMMARY\n" + (m["summary"] or "—")]
     from . import owners
-    loose = owners.open_items({meeting_id})
-    if loose["issues"] or loose["tasks"]:
-        lines.append(f"⚠ NO OWNER ({len(loose['issues']) + len(loose['tasks'])}): discussed, but nobody was given it\n"
-                     + "\n".join([f"• {u['description']}" + (f" — {u['why']}" if u["why"] else "") for u in loose["issues"]]
-                                 + [f"• {t['description']} (task without an assignee)" for t in loose["tasks"]])
-                     + "\nGive each one to someone (or mark it “Not needed”) in “Needs an owner”.")
+    loose = owners.unassigned({meeting_id})
+    if loose:
+        lines.append(f"REMINDER: {len(loose)} task(s) without an assignee yet\n"
+                     + "\n".join(f"• {t['description']}" for t in loose)
+                     + "\nChoose who does each one in Tasks.")
     if m["decisions"]:
         lines.append("DECISIONS\n" + "\n".join(f"• {d['description']}" for d in m["decisions"]))
     if m["tasks"]:
@@ -65,7 +64,7 @@ def meeting_processed(meeting_id):
     if m["open_questions"]:
         lines.append("OPEN QUESTIONS\n" + "\n".join(f"• {q}" for q in m["open_questions"]))
     mailer.send(pm["email"], f"Meeting processed: {m['title']}", "\n\n".join(lines), kind="meeting",
-                link=f"{mailer.app_url()}/#/meeting/{meeting_id}", link_text="Open the meeting")
+                link=f"{mailer.app_url()}/#/meeting/{meeting_id}", link_text="Open the meeting", owner_id=pm["id"])
     db.update_meeting(meeting_id, notified_at=db.now())
 
 
@@ -95,9 +94,8 @@ def send_daily_reminders(today=None):
             digests.append((pm, tasks, mids))
 
     from . import owners
-    digests = [(pm, tasks, owners.open_items(mids) if mids else {"issues": [], "tasks": []})
-               for pm, tasks, mids in digests]
-    digests = [d for d in digests if d[1] or d[2]["issues"] or d[2]["tasks"]]
+    digests = [(pm, tasks, owners.unassigned(mids) if mids else []) for pm, tasks, mids in digests]
+    digests = [d for d in digests if d[1] or d[2]]
 
     fmt = lambda t: (f"• {t['description']} — {t['who'] or 'unassigned'} ({t['project']}, due {t['due_date']})"
                      + (f" [{t['jira_key']}]" if t["jira_key"] else ""))
@@ -105,22 +103,21 @@ def send_daily_reminders(today=None):
         late = [t for t in tasks if t["due_date"] < today.isoformat()]
         soon = [t for t in tasks if t["due_date"] >= today.isoformat()]
         parts = [f"Hi {pm['full_name'].split()[0]},"]
-        n_loose = len(loose["issues"]) + len(loose["tasks"])
+        n_loose = len(loose)
         if n_loose:
-            parts.append(f"⚠ STILL WITHOUT AN OWNER ({n_loose})\n" + "\n".join(
-                [f"• {u['description']} (from “{u['meeting_title']}”, {u['meeting_date']})" for u in loose["issues"]]
-                + [f"• {t['description']} (task without an assignee, “{t['meeting_title']}”)" for t in loose["tasks"]])
-                + f"\nGive them to someone: {mailer.app_url()}/#/owners")
+            parts.append(f"STILL WITHOUT AN ASSIGNEE ({n_loose})\n" + "\n".join(
+                f"• {t['description']} (“{t['meeting_title']}”, {t['meeting_date']})" for t in loose)
+                + f"\nChoose who does them: {mailer.app_url()}/#/tasks?person=none")
         if late:
             parts.append(f"LATE ({len(late)})\n" + "\n".join(map(fmt, late)))
         if soon:
             parts.append(f"DUE TODAY OR TOMORROW ({len(soon)})\n" + "\n".join(map(fmt, soon)))
         subject = (f"Reminder: {len(late)} late task(s)" if late else f"Reminder: {len(soon)} task(s) due soon" if soon
-                   else f"Reminder: {n_loose} item(s) without an owner")
+                   else f"Reminder: {n_loose} task(s) without an assignee")
         if n_loose and (late or soon):
-            subject += f", {n_loose} without an owner"
+            subject += f", {n_loose} without an assignee"
         mailer.send(pm["email"], subject, "\n\n".join(parts), kind="reminder",
-                    link=f"{mailer.app_url()}/#/tasks", link_text="View tasks")
+                    link=f"{mailer.app_url()}/#/tasks", link_text="View tasks", owner_id=pm["id"])
     return len(digests)
 
 

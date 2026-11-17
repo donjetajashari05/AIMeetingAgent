@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS standup_updates (
     carried_over TEXT,    -- JSON list: planned at the previous standup and still not finished
     status TEXT NOT NULL, -- on_track | at_risk | blocked
     status_reason TEXT,
-    quote TEXT
+    quote TEXT,
+    unclear INTEGER NOT NULL DEFAULT 0  -- they spoke, but the recording was too unclear to tell what
 );
 CREATE INDEX IF NOT EXISTS standup_updates_meeting ON standup_updates(meeting_id);
 """
@@ -42,6 +43,9 @@ STATUSES = ("on_track", "at_risk", "blocked")
 def init():
     with db.connect() as c:
         c.executescript(SCHEMA)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(standup_updates)")}
+        if "unclear" not in cols:  # databases from before the column existed
+            c.execute("ALTER TABLE standup_updates ADD COLUMN unclear INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------- What the AI writes ----------
@@ -64,6 +68,8 @@ class PersonUpdate(BaseModel):
                     "problems, unsure about the deadline); blocked = cannot continue without help")
     status_reason: str = Field(description="Why that status, a few English words")
     quote: str = Field(description="Short verbatim quote from what they said (original language)")
+    unclear: bool = Field(description="True when this person spoke but the transcript of their part is too garbled "
+                                      "to tell what they said (then done/today/blockers stay empty)")
 
 
 class StandupNotes(BaseModel):
@@ -93,7 +99,14 @@ For each person who gives an update:
   are called by name: "<emri>, ti?" and the next speaker answers; or they say their own name).
   The same label is the same person for the whole standup. Merge everything one person said
   into ONE entry, even when they speak several times.
-- Do not invent anything. Someone who only asked questions or moderated gets no entry."""
+- EVERY speaker label that gives an update gets an entry, also when you cannot tell who it is:
+  then `person` is the label itself ("Folësi 3"); the PM names them later. Never drop someone
+  because their name is unknown.
+- When a speaker clearly took a turn but their part of the transcript is too garbled to
+  understand, still give them an entry with unclear = true, empty lists, status on_track and
+  status_reason "Not clear in the recording". Never guess what they said.
+- Do not invent anything. Someone who only asked questions or moderated (calls on people,
+  "po, faleminderit", "kush vazhdon?") gets no entry."""
 
 
 def _previous(m):
@@ -154,10 +167,10 @@ def save(meeting_id, notes, people):
             person = names.get(p["person"].strip().lower(), p["person"]).strip()[:120]
             status = p["status"] if p["status"] in STATUSES else "on_track"
             c.execute("INSERT INTO standup_updates (meeting_id, person, employee_id, done, today, blockers, carried_over, "
-                      "status, status_reason, quote) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      "status, status_reason, quote, unclear) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                       (meeting_id, person, org.match_employee(person, people),
                        *(json.dumps(p.get(k) or [], ensure_ascii=False) for k in ("done", "today", "blockers", "carried_over")),
-                       status, p.get("status_reason"), p.get("quote")))
+                       status, p.get("status_reason"), p.get("quote"), 1 if p.get("unclear") else 0))
             text = "; ".join(x for x in [
                 f"done: {', '.join(p.get('done') or [])}" if p.get("done") else "",
                 f"today: {', '.join(p.get('today') or [])}" if p.get("today") else "",
@@ -206,7 +219,7 @@ def by_person(meeting_ids=None, days=14, project_id=None):
         rows = [_decode(r) for r in db.rows(c.execute(f"""
             SELECT u.*, COALESCE(e.full_name, u.person) AS name, m.meeting_date, m.id AS meeting_id, m.title
             FROM standup_updates u JOIN meetings m ON m.id = u.meeting_id LEFT JOIN employees e ON e.id = u.employee_id
-            WHERE m.kind = 'standup' AND m.meeting_date >= ?{only}{proj}
+            WHERE m.kind = 'standup' AND m.meeting_date >= ? AND u.unclear = 0{only}{proj}
             ORDER BY m.meeting_date DESC, m.id DESC""", (since, *(meeting_ids or ()), *((project_id,) if project_id else ()))))]
     people = {}
     for r in rows:

@@ -99,6 +99,9 @@ def correct_lines(lines, glossary=(), people=(), client=None, on_progress=None, 
         chunk = lines[start:start + CHUNK]
         try:
             result = llm.structured(SYSTEM_PROMPT, f"{context}<transcript>\n{_lines_text(chunk, start)}\n</transcript>",
+                                    # medium, on purpose: "low" is ~2 min faster per meeting on Groq but
+                                    # left the transcript uncorrected (tested 2026-11-16: "hejxarët" stayed,
+                                    # medium made it "HR", "dashpor" -> "dashboard"); the PM chose accuracy
                                     Fixes, max_tokens=16000, effort="medium")
         except llm.LLMError as e:
             if "API_KEY" in str(e):

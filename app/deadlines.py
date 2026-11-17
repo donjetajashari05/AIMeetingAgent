@@ -92,7 +92,7 @@ def remind_people(today):
                          + ". When it is finished, move it to Done in Jira.")
         lines.append("If the date has to change, tell your project manager.")
         mailer.send(t["email"], f"Due tomorrow: {t['description']}", "\n\n".join(lines), kind="deadline",
-                    link=t["jira_url"] or None, link_text="Open in Jira" if t["jira_url"] else None)
+                    link=t["jira_url"] or None, link_text="Open in Jira" if t["jira_url"] else None, owner_id=t["pm_id"])
         with db.connect() as c:
             _log(c, t["id"], "due_tomorrow", t["due_date"], today.isoformat())
         sent += 1
@@ -116,7 +116,7 @@ def alert_pms(today):
                 f"{'are' if n > 1 else 'is'} not Done in Jira:\n\n" + "\n".join(rows)
                 + "\n\nCheck with the people, move the due date, or close the ticket in Jira if it is finished.")
         mailer.send(email, f"Overdue: {n} ticket{'s' if n > 1 else ''} not Done in Jira", body, kind="overdue",
-                    link=f"{mailer.app_url()}/#/tasks?tab=sent", link_text="Open the tickets")
+                    link=f"{mailer.app_url()}/#/tasks?tab=sent", link_text="Open the tickets", owner_id=tickets[0]["pm_id"])
         with db.connect() as c:
             for t in tickets:
                 _log(c, t["id"], "overdue", t["due_date"], today.isoformat())

@@ -46,7 +46,8 @@ def _scope(m):
         return "pm.project_id = ?", (m["project_id"],)
     if m.get("team_id"):
         return "pm.team_id = ?", (m["team_id"],)
-    return "1 = 1", ()
+    # No project or team: the earlier meetings of the same PM only (never another PM's workspace)
+    return "pm.created_by IS ?", (m.get("created_by"),)
 
 
 def _earlier(m):
@@ -100,14 +101,18 @@ def context(m):
     return {"items": items, "text": "\n\n".join(parts)}
 
 
-def closed_tickets(m=None, project_id=None):
+def closed_tickets(m=None, project_id=None, meeting_ids=None):
     """Finished tickets (also ones sent to Jira) that the same work can reopen instead of a new ticket.
-    m: a meeting (its project / team scope, the meeting itself left out); otherwise project_id (None = all)."""
+    m: a meeting (its project / team scope, the meeting itself left out); otherwise project_id (None = all)
+    within meeting_ids (the PM's visible meetings; None = all)."""
     if m is not None:
         scope, args = _scope(m)
         where, args = f"pm.id != ? AND {scope}", (m["id"], *args)
     else:
         where, args = "(? IS NULL OR pm.project_id = ?)", (project_id, project_id)
+        if meeting_ids is not None:
+            where += f" AND pm.id IN ({db._in(meeting_ids)})"
+            args = (*args, *meeting_ids)
     with db.connect() as c:
         return db.rows(c.execute(f"""
             SELECT t.id, t.description, COALESCE(e.full_name, t.assignee) AS who, t.jira_key, t.is_ticket
@@ -144,7 +149,7 @@ def save_reopened(meeting_id, reopened):
     """reopened: [(ticket, note, quote)] found by the pipeline. Reopens them and records it on the meeting."""
     m = db.get_meeting(meeting_id)
     for ticket, note, quote in reopened:
-        reopen(ticket["id"], f"Reopened by AnchorzUp Meeting Agent: the same work came up again in the meeting "
+        reopen(ticket["id"], f"Reopened by SyncUp: the same work came up again in the meeting "
                              f"“{m['title']}” ({m['meeting_date']}). {note}")
         with db.connect() as c:
             c.execute("INSERT INTO task_updates (task_id, meeting_id, status, note, quote, closed_task, created_at) "

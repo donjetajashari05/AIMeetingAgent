@@ -1,4 +1,4 @@
-# AI Meeting Assistant me Memorie Afatgjate
+# SyncUp: asistenti i mbledhjeve me memorie afatgjatë
 
 ## Struktura
 
@@ -37,7 +37,13 @@ Pastaj hap http://127.0.0.1:8000 në shfletues. Serveri dëgjon vetëm në kët�
   ose ngarko një transkript `.json` (p.sh. `data/samples/mbledhja_shembull.json`).
 - Përpunimi bëhet në sfond: transkriptimi → folësit → vendimet dhe detyrat.
 - **Detyrat**: shëno si të kryera; raporti në panel tregon sa janë kryer dhe sa janë me vonesë.
+- **Notes**: sticky notes private për PM-të dhe administratorët (ngjyra, pin, kërkim, ruhen vetë,
+  renditen me drag & drop ose me shigjetat e tastierës te doreza sipër shënimit).
+  I sheh vetëm ai që i shkruan, edhe administratori jo. Nuk dërgohen askund (as email, as Google, as AI).
 - **Pyet arkivin**: kërkon në të gjitha mbledhjet dhe përgjigjet me burimin (mbledhja + minuta).
+  Butoni 🎤 të lejon ta pyesësh me zë: Whisper e shkruan pyetjen në këtë kompjuter (zëri nuk del
+  jashtë dhe fshihet menjëherë), pastaj pyetja bëhet si e shkruar. Modeli: `ASK_VOICE_MODEL`
+  (parazgjedhur `large-v3-turbo`, ~10 s në CPU); gjuha: `ASK_VOICE_LANGUAGE` (parazgjedhur `sq`).
 - **Ekipi**: punonjësit, ekipet dhe projektet (një punonjës mund të jetë në disa). Shtoji një nga
   një ose importo me CSV (`Emri, Email, Roli, Ekipet, Projektet`, disa grupe ndahen me `;`).
   Kur mbledhja lidhet me një ekip/projekt, Claude i merr emrat e anëtarëve dhe detyrat lidhen
@@ -70,6 +76,15 @@ Pa SMTP të konfiguruar, kodi shfaqet në terminalin e serverit.
   Pa to, asgjë s’dërgohet: emailet shihen te faqja “Njoftimet”.
 - **Jira Cloud**: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, dhe te çdo projekt “Çelësi në Jira”.
   Butoni “Dërgo në Jira” te mbledhja krijon tiketat, të caktuara sipas emailit të punonjësit.
+- **Google Calendar (opsional, vetëm lexim)**: `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` (hapat te
+  `.env.example`). Çdo PM e lidh kalendarin e vet te Home → “Connect Google Calendar”. Pastaj Home
+  shfaq mbledhjet e sotme dhe “New meeting” plotëson titullin, datën, projektin dhe të ftuarit nga
+  ngjarja. Aplikacioni kërkon vetëm leje leximi (`calendar.events.readonly`). Token-i ruhet i enkriptuar
+  dhe “Disconnect” e heq lejen edhe te Google.
+  **Mbledhje online:** butoni anash (poshtë djathtas) hap asistentin që krijon mbledhje me link Google
+  Meet. Google ua dërgon ftesën me email të ftuarve dhe ua shton në kalendar. Për këtë aplikacioni
+  kërkon edhe `calendar.app.created`: krijon kalendarin e vet “SyncUp meetings” dhe menaxhon vetëm
+  ngjarjet në të, kurrë kalendarët e tjerë.
 
 Çelësat vendosen në `.env` (shih `.env.example`), pastaj rinise serverin:
 

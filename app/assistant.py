@@ -163,14 +163,16 @@ def _task_text(t):
     return f"{t['description']} — " + ", ".join(bits)
 
 
-def _gather(plan, question, meeting_ids, user_id, tasks=True):
+def _gather(plan, question, meeting_ids, user_id, tasks=True, project_ids=None):
     """Numbered sources for the answer and for the page."""
     people = {e["full_name"].lower(): e for e in _employees()}
     person = people.get((plan.person or "").lower())
     with db.connect() as c:
         project_id = None
         if plan.project:
-            r = c.execute("SELECT id FROM projects WHERE lower(name) = lower(?)", (plan.project,)).fetchone()
+            r = c.execute("SELECT id FROM projects WHERE lower(name) = lower(?)"
+                          + ("" if project_ids is None else f" AND id IN ({_in(project_ids)})"),
+                          (plan.project, *(project_ids or ()))).fetchone()
             project_id = r[0] if r else None
         needs = set(plan.needs or []) or {"tasks", "decisions", "summaries", "transcript"}
         if person:
@@ -208,9 +210,13 @@ def _employees():
         return db.rows(c.execute("SELECT id, full_name, aliases FROM employees WHERE active = 1"))
 
 
-def _projects():
+def _projects(project_ids=None):
+    """Project names for the question planner: only the asking PM's own (None = all)."""
     with db.connect() as c:
-        return [r[0] for r in c.execute("SELECT name FROM projects ORDER BY name")]
+        if project_ids is None:
+            return [r[0] for r in c.execute("SELECT name FROM projects ORDER BY name")]
+        return [r[0] for r in c.execute(f"SELECT name FROM projects WHERE id IN ({_in(project_ids)}) ORDER BY name",
+                                        tuple(project_ids))]
 
 
 # ---------- 3. Answer ----------
@@ -239,7 +245,7 @@ def _source_line(s):
     return f"[{s['n']}] {label} · {where}: {s['text']}"
 
 
-def ask(question, has_key, meeting_ids=None, user_id=None, history=None, tasks=True):
+def ask(question, has_key, meeting_ids=None, user_id=None, history=None, tasks=True, project_ids=None):
     """meeting_ids: the meetings this user may see (None = all); user_id: their own tasks are always
     visible. history: [{"q", "a"}] of this conversation. tasks=False: no tasks or tickets in the answer
     (they are only for PMs and administrators). Raises llm.LLMError."""
@@ -254,11 +260,11 @@ def ask(question, has_key, meeting_ids=None, user_id=None, history=None, tasks=T
                           "for a full AI answer.", "sources": sources, "ai": False}
 
     today = date.today()
-    plan = _plan(question, history, today, _employees(), _projects())
+    plan = _plan(question, history, today, _employees(), _projects(project_ids))
     plan.date_from, plan.date_to = _valid_date(plan.date_from), _valid_date(plan.date_to)
     if plan.task_status not in ("open", "done", "any"):
         plan.task_status = "any"
-    sources, person = _gather(plan, question, meeting_ids, user_id, tasks)
+    sources, person = _gather(plan, question, meeting_ids, user_id, tasks, project_ids)
     if not sources:
         return {"answer": "I found nothing about this in the meetings you can see.", "sources": [], "ai": True,
                 "plan": plan.model_dump()}

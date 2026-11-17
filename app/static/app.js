@@ -3,9 +3,13 @@
 /* ================= Helpers ================= */
 
 const ICONS = {
+  archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/>',
   report: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   wave: '<path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  note: '<path d="M5 3h14a2 2 0 0 1 2 2v9l-7 7H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 21v-5a2 2 0 0 1 2-2h5"/>',
+  pin: '<path d="M12 17v5"/><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z"/>',
+  grip: '<circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/>',
   grid: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   check: '<path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>',
@@ -29,6 +33,8 @@ const ICONS = {
   jira: '<path d="M12 3l9 9-9 9-9-9z"/><path d="M12 8l4 4-4 4-4-4z"/>',
   layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
   shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  video: '<rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-4v12l-6-4"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   book: '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3M9 7h6"/>',
 };
@@ -204,7 +210,8 @@ function statusChip(m) {
 
 const state = { me: null, status: null, org: { employees: [], teams: [], projects: [] }, today: new Date().toISOString().slice(0, 10), poll: null, cleanup: null };
 
-const isAdmin = () => !!(state.me && state.me.is_admin);
+// Every PM manages their own workspace (team, emails, vocabulary…); the server shows each one only their own data
+const isAdmin = () => !!(state.me && (state.me.is_admin || state.me.owns_workspace));
 const isManager = () => !!(state.me && (state.me.is_admin || state.me.is_pm));
 const ROLE_LABEL = { admin: 'Administrator', pm: 'Project manager', employee: 'Employee' };
 
@@ -241,16 +248,11 @@ async function loadStatus() {
 async function refreshOpenCount() {
   if (!isManager()) return;  // tasks and tickets are for PMs; the others work in Jira
   try {
-    const tasks = await api('/api/tasks?status=open');
+    // Both at once (one round trip instead of two)
+    const [tasks, tickets] = await Promise.all([api('/api/tasks?status=open'), api('/api/tickets')]);
     document.getElementById('open-count').textContent = tasks.length || '';
-    if (isManager()) {
-      // Tickets waiting for the PM: still to review or ready to send
-      const tickets = await api('/api/tickets');
-      document.getElementById('ticket-count').textContent = tickets.filter((t) => !t.jira_key && t.status !== 'done').length || '';
-      const loose = await api('/api/owners');
-      state.ownerCount = loose.issues.length + loose.tasks.length;
-      document.getElementById('owner-count').textContent = state.ownerCount || '';
-    }
+    // Tickets waiting for the PM: still to review or ready to send
+    document.getElementById('ticket-count').textContent = tickets.filter((t) => !t.jira_key && t.status !== 'done').length || '';
   } catch { /* ignore */ }
 }
 
@@ -274,6 +276,10 @@ async function route() {
     location.replace(`#/tasks?${q}`);
     return;
   }
+  if (/^#\/owners(\?|$)/.test(location.hash)) {  // old "Needs an owner" links (emails): unassigned tasks
+    location.replace('#/tasks?person=none');
+    return;
+  }
   const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
   const [name, id] = hash.split('/');
   const key = name === 'meeting' ? 'meetings' : name === 'standup' ? 'standups' : (name || 'home');
@@ -286,9 +292,10 @@ async function route() {
     else if (name === 'standups' && isManager()) await renderStandups();
     else if (name === 'standup' && id && isManager()) await renderStandup(Number(id));
     else if (name === 'tasks' && isManager()) await renderWork();
-    else if (name === 'owners' && isManager()) await renderOwners();
+    else if (name === 'notes' && isManager()) await renderNotes();
     else if (name === 'ask') renderAsk();
     else if (name === 'weekly' && isManager()) await renderWeekly();
+    else if (name === 'archive') await renderArchive(id);
     else if (name === 'team' && isAdmin()) await renderTeam();
     else if (name === 'outbox' && isAdmin()) await renderOutbox();
     else if (name === 'security' && isAdmin()) await renderSecurity();
@@ -299,6 +306,7 @@ async function route() {
     view.replaceChildren(el('div', { class: 'page' }, notice('error', 'alert', e.message)));
   }
   refreshOpenCount();
+  syncAssist();
 }
 
 window.addEventListener('hashchange', () => { route(); view.focus({ preventScroll: true }); window.scrollTo(0, 0); });
@@ -528,15 +536,65 @@ function renderAnswer(container, res) {
 function askBox({ onAsk, autofocus = false }) {
   const input = el('input', { id: 'ask', type: 'text', placeholder: 'Ask about any meeting… e.g. What did we decide about the budget last month?', autocomplete: 'off' });
   const send = el('button', { type: 'submit', 'aria-label': 'Send question' }, icon('arrow', 18, 2.2));
+  const mic = el('button', { type: 'button', class: 'ask-mic', 'aria-label': 'Ask by voice', title: 'Ask by voice' }, icon('mic', 18, 2.2));
   const form = el('form', {
     class: 'ask-box',
     onsubmit: (e) => { e.preventDefault(); const q = input.value.trim(); if (q) onAsk(q, input, send); },
-  }, icon('search', 20, 2), input, send);
+  }, icon('search', 20, 2), input, mic, send);
+  voiceAsk(mic, input, form);
   if (autofocus) setTimeout(() => input.focus(), 0);
   const chips = el('div', { class: 'chips' }, EXAMPLES.map((q) => el('button', {
     type: 'button', class: 'chip', text: q, onclick: () => { input.value = q; form.requestSubmit(); },
   })));
   return { form, input, chips };
+}
+
+/** Microphone button: record the question, the server writes it down (Whisper on this
+ * computer, the recording is deleted), then it is asked like a typed one. */
+function voiceAsk(mic, input, form) {
+  if (!navigator.mediaDevices || !window.MediaRecorder) { mic.hidden = true; return; }
+  const placeholder = input.placeholder;
+  let rec = null; let stream = null; let timer = null; let chunks = []; let cancelled = false;
+  const reset = () => {
+    mic.classList.remove('rec', 'busy'); mic.disabled = false; input.disabled = false;
+    input.placeholder = placeholder; mic.setAttribute('aria-label', 'Ask by voice'); mic.title = 'Ask by voice';
+  };
+  const stop = () => { clearTimeout(timer); if (rec && rec.state === 'recording') rec.stop(); };
+  const cancel = () => { cancelled = true; stop(); };  // left the page while recording: discard it
+  mic.onclick = async () => {
+    if (rec && rec.state === 'recording') { stop(); return; }
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {
+      toast('Microphone access was denied. Allow it in the browser and try again.'); return;
+    }
+    const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    chunks = []; cancelled = false;
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      window.removeEventListener('hashchange', cancel);
+      if (cancelled) { reset(); return; }
+      const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+      if (blob.size < 2000) { reset(); toast('I didn’t hear anything. Try again.'); return; }
+      mic.classList.remove('rec'); mic.classList.add('busy'); mic.disabled = true; input.disabled = true;
+      input.value = ''; input.placeholder = 'Writing down your question…';
+      const ext = blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm';
+      const fd = new FormData();
+      fd.append('file', blob, `question.${ext}`);
+      try {
+        const r = await api('/api/ask/voice', { method: 'POST', body: fd });
+        reset();
+        if (!r.text) { toast('I didn’t catch that. Try again or type it.'); input.focus(); return; }
+        input.value = r.text;
+        form.requestSubmit();
+      } catch (e) { reset(); toast(e.message); }
+    };
+    rec.start();
+    window.addEventListener('hashchange', cancel, { once: true });
+    mic.classList.add('rec'); mic.setAttribute('aria-label', 'Stop and ask'); mic.title = 'Stop and ask';
+    input.value = ''; input.placeholder = 'Listening… click the microphone again when you finish';
+    timer = setTimeout(stop, 60000);  // at most a minute
+  };
 }
 
 async function runAsk(q, input, send, out, history = null) {
@@ -582,12 +640,21 @@ function newMeetingButtons() {
 /* ---------- Home ---------- */
 
 async function renderHome() {
+  // Back from Google's sign-in (Google Calendar)
+  const calResult = new URLSearchParams(location.hash.split('?')[1] || '').get('calendar');
+  if (calResult) {
+    history.replaceState(null, '', '#/');
+    cal.account = undefined;
+    const msg = { connected: 'Google Calendar connected.', denied: 'Google Calendar was not connected: access was refused.',
+      failed: 'Google Calendar could not be connected. Try again.' }[calResult];
+    if (msg) toast(msg);
+  }
   // Tasks and tickets are only for PMs and administrators; the others see the meetings
   const manager = isManager();
   const [meetings, report, tasks, loose] = await Promise.all([api('/api/meetings'),
     manager ? api('/api/report') : null, manager ? api('/api/tasks?status=open') : [],
-    manager ? api('/api/owners') : { issues: [], tasks: [] }]);
-  const nLoose = loose.issues.length + loose.tasks.length;
+    manager ? api('/api/owners') : { tasks: [] }]);
+  const nLoose = loose.tasks.length;
 
   const out = el('div', { class: 'hero-answer', hidden: true });
   const ask = askBox({ onAsk: (q, i, s) => { out.hidden = false; runAsk(q, i, s, out); } });
@@ -618,9 +685,9 @@ async function renderHome() {
   view.replaceChildren(el('div', { class: 'page' },
     hero,
     isAdmin() ? keyNotice() : null,
-    nLoose ? notice('warn', 'alert', el('strong', { text: `${nLoose} item${nLoose === 1 ? '' : 's'} without an owner. ` }),
-      'Discussed in meetings, but nobody was given ', nLoose === 1 ? 'it' : 'them', '. ',
-      el('a', { href: '#/owners', text: 'Give them to someone →' })) : null,
+    nLoose ? notice('warn', 'user', el('strong', { text: `Reminder: ${nLoose} task${nLoose === 1 ? '' : 's'} without an assignee. ` }),
+      el('a', { href: '#/tasks?person=none', text: 'Choose who does them →' })) : null,
+    manager && state.status.calendar ? calendarCard() : null,
     manager ? el('div', { class: 'row' }, el('div', { class: 'col-3 stack' }, reportCard(report)), processingSlot) : null,
     el('div', { class: 'row' }, meetingsSlot, manager ? el('div', { class: 'col-2 stack' }, openTasksCard(tasks)) : null),
   ));
@@ -734,8 +801,51 @@ async function renderMeetings() {
   const paint = (l) => slot.replaceChildren(...(l.length ? l.map(meetingRow)
     : [el('div', { class: 'empty' }, el('strong', { text: 'No meetings yet' }), 'Add the first one with “Upload audio” or “Record”.')]));
   paint(list);
-  view.replaceChildren(el('div', { class: 'page' }, pageHead(`${list.length} total`, 'Meetings', ...newMeetingButtons()), slot));
+  view.replaceChildren(el('div', { class: 'page' }, pageHead(`${list.length} this week`, 'Meetings', ...newMeetingButtons()),
+    // Recorded meetings first; the (fewer) online meetings below them
+    slot, state.status.calendar && isManager() ? onlineMeetingsCard() : null,
+    el('p', { class: 'small subtle' }, icon('archive', 14, 2), ' Meetings of earlier weeks are in the ', el('a', { href: '#/archive', text: 'Archive' }), '.')));
   if (list.some(isBusy)) poll(async () => { const l = await api('/api/meetings'); paint(l); if (!l.some(isBusy)) stopPolling(); });
+}
+
+/** Meetings page: online meetings created with the assistant (Google Meet). */
+function onlineMeetingsCard() {
+  const card = el('section', { class: 'card', 'aria-label': 'Online meetings', style: { gap: '4px' } });
+  const paint = async () => {
+    let list;
+    try { list = await api('/api/calendar/meetings'); } catch (e) { card.replaceChildren(el('p', { class: 'small form-error', text: e.message })); return; }
+    const now = Date.now();
+    const live = list.filter((m) => m.status === 'scheduled');
+    card.replaceChildren(
+      el('div', { class: 'card-head', style: { marginBottom: '8px' } }, cardTitle('video', 'Online meetings'),
+        el('button', { type: 'button', class: 'btn', onclick: () => toggleAssist(true) }, icon('plus', 16, 2), 'New online meeting')));
+    if (!list.length) {
+      card.append(el('p', { class: 'small subtle', text: 'Meetings you create with the assistant (Google Meet link, invitations by email) appear here and in Google Calendar.' }));
+      return;
+    }
+    card.append(...list.map((m) => {
+      const start = new Date(m.start_at); const end = new Date(m.end_at);
+      const cancelled = m.status === 'cancelled';
+      const past = end.getTime() < now;
+      const ev = { id: m.google_event_id, title: m.title, start: m.start_at, end: m.end_at, people: m.people, speakers: m.guests.length + 1, project_id: m.project_id };
+      const cancel = async () => {
+        if (!confirm(`Cancel “${m.title}”? Everyone invited gets the cancellation by email.`)) return;
+        try { await api(`/api/calendar/meetings/${m.id}`, { method: 'DELETE' }); toast('Meeting cancelled. The guests were told by email.'); paint(); } catch (e) { toast(e.message); }
+      };
+      return el('div', { class: `cal-row${cancelled ? ' cancelled' : ''}` },
+        el('span', { class: 'mono small subtle', text: `${fmtShort(localDate(start))} ${calTime(m.start_at)}` }),
+        el('span', { class: 'cal-title' }, el('strong', { text: m.title }),
+          el('small', { class: 'subtle', text: [cancelled ? 'Cancelled' : past ? 'Ended' : null, m.project_name, `${m.guests.length} invited`,
+            m.created_by !== state.me.id ? `by ${m.created_by_name}` : null].filter(Boolean).join(' · ') })),
+        el('span', { class: 'cal-actions' }, ...nn(
+          !cancelled && !past && m.meet_link ? el('a', { class: 'btn', href: m.meet_link, target: '_blank', rel: 'noopener noreferrer' }, icon('video', 14, 2), 'Join') : null,
+          !cancelled && start.getTime() <= now ? el('button', { type: 'button', class: 'btn', onclick: () => openUpload('file', 'meeting', ev) }, icon('upload', 14, 2), 'Add recording') : null,
+          !cancelled && !past && m.created_by === state.me.id ? el('button', { type: 'button', class: 'icon-btn', 'aria-label': `Cancel ${m.title}`, title: 'Cancel the meeting', onclick: cancel }, icon('trash', 16, 2)) : null)));
+    }));
+    if (!live.length) card.append(el('p', { class: 'small subtle', text: 'Nothing scheduled.' }));
+  };
+  paint();
+  return card;
 }
 
 /* ---------- Tasks ---------- */
@@ -784,7 +894,7 @@ async function renderTasks(host, recount) {
   let meetingFilter = Number(params.get('meeting')) || null;
   let [all] = await Promise.all([api('/api/tasks'), loadOrg()]);
   let filter = 'open';
-  let person = '';
+  let person = params.get('person') || '';
   // Selection mode: pick one or more tasks and the AI writes ONE ticket from them
   const picking = isManager();  // the PM's checkboxes select tasks for a ticket
   const listSlot = el('section', { class: 'card', style: { gap: 0 } });
@@ -794,7 +904,7 @@ async function renderTasks(host, recount) {
   const personSel = el('select', { class: 'assign', 'aria-label': 'Filter by person', style: { minHeight: '44px', maxWidth: '260px' },
     onchange: () => { person = personSel.value; paint(); } },
   el('option', { value: '', text: 'Everyone' }),
-  el('option', { value: 'none', text: 'Not linked to an employee' }),
+  el('option', { value: 'none', text: 'No assignee yet' }),
   state.org.employees.map((e) => el('option', { value: e.id, text: e.full_name })));
 
   const reloadTasks = async () => { all = await api('/api/tasks'); recount(); paint(); };
@@ -866,6 +976,56 @@ function isoDay(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padSt
 function shiftWeek(iso, weeks) { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + 7 * weeks); return isoDay(d); }
 function shiftMonth(iso, months) { const d = new Date(`${iso}T12:00:00`); d.setDate(1); d.setMonth(d.getMonth() + months); return isoDay(d); }
 
+/** The body of a weekly/monthly report (tiles, highlights, sections). Also used by the Archive. */
+function reportBody(r, unit) {
+  const c = r.counts;
+  const tile = (n, label, tone) => el('div', { class: `wk-tile ${tone || ''}` }, el('b', { text: n }), el('span', { text: label }));
+  const taskLine = (t, { due = true, extra = null } = {}) => el('div', { class: 'list-row' },
+    el('div', { class: 'grow' },
+      el('a', { href: t.meeting_source === 'manual' ? '#/tasks?tab=send' : `#/meeting/${t.meeting_id}`, text: t.description }),
+      extra ? el('p', { class: 'small muted', style: { margin: '2px 0 0' }, text: extra }) : null),
+    el('span', { class: 'small muted', text: t.who || 'unassigned' }),
+    due && t.due_date ? el('span', { class: `small mono ${t.due_date < r.as_of ? 'late-text' : 'muted'}`, text: fmtShort(t.due_date) }) : null,
+    t.jira_key ? el('span', { class: 'jira-badge', text: t.jira_key }) : null);
+  const section = (title, rows, render, { tone = '', empty = null } = {}) => ((rows.length || empty) ? el('section', { class: `card ${tone}` },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: title }), el('span', { class: 'mono small muted', text: rows.length })),
+    rows.length ? el('div', { class: 'list' }, rows.map(render)) : el('p', { class: 'small subtle', text: empty })) : null);
+
+  const maxOpen = Math.max(1, ...r.workload.map((w) => w.open));
+  const workload = r.workload.length ? el('section', { class: 'card' },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Open work per person' })),
+    el('div', { class: 'wk-load' }, r.workload.map((w) => el('div', { class: 'wk-load-row' },
+      el('span', { class: 'who', text: w.who }),
+      el('span', { class: 'track' }, el('span', { class: 'fill', style: { width: `${(w.open / maxOpen) * 100}%` } }),
+        w.overdue ? el('span', { class: 'fill late', style: { width: `${(w.overdue / maxOpen) * 100}%` } }) : null),
+      el('span', { class: 'small mono', title: w.hours ? 'Open tickets/tasks · estimated hours · high priority · late' : null,
+        text: [String(w.open), w.hours ? `~${fmtEstimate(w.hours)}` : null, w.high ? `${w.high} high` : null,
+          w.overdue ? `${w.overdue} late` : null].filter(Boolean).join(' · ') }))))) : null;
+
+  const nothing = !c.meetings && !c.completed && !c.created && !c.overdue && !r.due_soon.length;
+  return nn(
+    el('div', { class: 'wk-tiles' },
+      tile(c.meetings, 'meetings'), tile(c.completed, 'finished', 'good'), tile(c.created, 'new'),
+      tile(c.sent, 'sent to Jira'), tile(c.overdue, 'overdue', c.overdue ? 'bad' : ''), tile(c.blocked, 'blocked', c.blocked ? 'bad' : '')),
+    r.highlights ? el('section', { class: 'card wk-highlights' }, el('span', { class: 'eyebrow accent', text: 'Highlights' }), el('p', { text: r.highlights })) : null,
+    nothing ? el('div', { class: 'empty' }, el('strong', { text: `A quiet ${unit}` }), `No meetings, finished or new work in your projects this ${unit}.`) : null,
+    el('div', { class: 'row' },
+      el('div', { class: 'col-3 stack' }, ...nn(
+        section('Overdue', r.overdue, (t) => taskLine(t), { tone: r.overdue.length ? 'wk-bad' : '' }),
+        section('Blocked', r.blocked, (t) => taskLine(t, { extra: t.note ? `${t.note} (${t.said_in})` : null })),
+        section('Due in the next 7 days', r.due_soon, (t) => taskLine(t)),
+        section(`Finished this ${unit}`, r.completed, (t) => taskLine(t, { due: false, extra: t.done_by_jira ? 'Closed in Jira' : null })),
+        section('New work', r.created, (t) => taskLine(t)))),
+      el('div', { class: 'col-2 stack' }, ...nn(
+        workload,
+        section('Decisions', r.decisions, (d) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${d.meeting_id}`, text: d.description }))),
+        section('Still open questions', r.open_questions, (q) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${q.meeting_id}`, text: q.text }))),
+        section('Meetings', r.meetings, (m) => el('div', { class: 'list-row' },
+          el('span', { class: 'small mono muted', text: fmtShort(m.meeting_date) }),
+          el('a', { class: 'grow', href: `#/meeting/${m.id}`, text: m.title }),
+          el('span', { class: 'small muted', text: `${m.tasks} task${m.tasks === 1 ? '' : 's'}` })))))));
+}
+
 async function renderWeekly() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const week = params.get('week') || '';
@@ -900,55 +1060,11 @@ async function renderWeekly() {
     el('button', { type: 'button', class: 'icon-btn flip', 'aria-label': `Next ${unit}`, disabled: r.current, onclick: () => go(shift(1)) }, icon('back', 16, 2.2)),
     r.current ? el('span', { class: 'status work', text: `This ${unit}` }) : el('button', { type: 'button', class: 'btn btn-sm', onclick: () => go('') }, `This ${unit}`));
 
-  const c = r.counts;
-  const tile = (n, label, tone) => el('div', { class: `wk-tile ${tone || ''}` }, el('b', { text: n }), el('span', { text: label }));
-  const taskLine = (t, { due = true, extra = null } = {}) => el('div', { class: 'list-row' },
-    el('div', { class: 'grow' },
-      el('a', { href: t.meeting_source === 'manual' ? '#/tasks?tab=send' : `#/meeting/${t.meeting_id}`, text: t.description }),
-      extra ? el('p', { class: 'small muted', style: { margin: '2px 0 0' }, text: extra }) : null),
-    el('span', { class: 'small muted', text: t.who || 'unassigned' }),
-    due && t.due_date ? el('span', { class: `small mono ${t.due_date < r.as_of ? 'late-text' : 'muted'}`, text: fmtShort(t.due_date) }) : null,
-    t.jira_key ? el('span', { class: 'jira-badge', text: t.jira_key }) : null);
-  const section = (title, rows, render, { tone = '', empty = null } = {}) => ((rows.length || empty) ? el('section', { class: `card ${tone}` },
-    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: title }), el('span', { class: 'mono small muted', text: rows.length })),
-    rows.length ? el('div', { class: 'list' }, rows.map(render)) : el('p', { class: 'small subtle', text: empty })) : null);
-
-  const maxOpen = Math.max(1, ...r.workload.map((w) => w.open));
-  const workload = r.workload.length ? el('section', { class: 'card' },
-    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Open work per person' })),
-    el('div', { class: 'wk-load' }, r.workload.map((w) => el('div', { class: 'wk-load-row' },
-      el('span', { class: 'who', text: w.who }),
-      el('span', { class: 'track' }, el('span', { class: 'fill', style: { width: `${(w.open / maxOpen) * 100}%` } }),
-        w.overdue ? el('span', { class: 'fill late', style: { width: `${(w.overdue / maxOpen) * 100}%` } }) : null),
-      el('span', { class: 'small mono', title: w.hours ? 'Open tickets/tasks · estimated hours · high priority · late' : null,
-        text: [String(w.open), w.hours ? `~${fmtEstimate(w.hours)}` : null, w.high ? `${w.high} high` : null,
-          w.overdue ? `${w.overdue} late` : null].filter(Boolean).join(' · ') }))))) : null;
-
-  const nothing = !c.meetings && !c.completed && !c.created && !c.overdue && !r.due_soon.length;
   view.replaceChildren(el('div', { class: 'page' },
     pageHead('For project managers', monthly ? 'Monthly report' : 'Weekly report', ...nn(periodSwitch, projectSel, emailBtn)),
     el('div', { class: 'row', style: { alignItems: 'center', justifyContent: 'space-between' } }, nav,
       el('span', { class: 'small subtle', text: `Emailed automatically to each PM ${r.schedule}.${r.projects.length ? ` Projects: ${r.projects.join(', ')}.` : ''}` })),
-    el('div', { class: 'wk-tiles' },
-      tile(c.meetings, 'meetings'), tile(c.completed, 'finished', 'good'), tile(c.created, 'new'),
-      tile(c.sent, 'sent to Jira'), tile(c.overdue, 'overdue', c.overdue ? 'bad' : ''), tile(c.blocked, 'blocked', c.blocked ? 'bad' : '')),
-    r.highlights ? el('section', { class: 'card wk-highlights' }, el('span', { class: 'eyebrow accent', text: 'Highlights' }), el('p', { text: r.highlights })) : null,
-    nothing ? el('div', { class: 'empty' }, el('strong', { text: `A quiet ${unit}` }), `No meetings, finished or new work in your projects this ${unit}.`) : null,
-    el('div', { class: 'row' },
-      el('div', { class: 'col-3 stack' }, ...nn(
-        section('Overdue', r.overdue, (t) => taskLine(t), { tone: r.overdue.length ? 'wk-bad' : '' }),
-        section('Blocked', r.blocked, (t) => taskLine(t, { extra: t.note ? `${t.note} (${t.said_in})` : null })),
-        section('Due in the next 7 days', r.due_soon, (t) => taskLine(t)),
-        section(`Finished this ${unit}`, r.completed, (t) => taskLine(t, { due: false, extra: t.done_by_jira ? 'Closed in Jira' : null })),
-        section('New work', r.created, (t) => taskLine(t)))),
-      el('div', { class: 'col-2 stack' }, ...nn(
-        workload,
-        section('Decisions', r.decisions, (d) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${d.meeting_id}`, text: d.description }))),
-        section('Still open questions', r.open_questions, (q) => el('div', { class: 'list-row' }, el('a', { class: 'grow', href: `#/meeting/${q.meeting_id}`, text: q.text }))),
-        section('Meetings', r.meetings, (m) => el('div', { class: 'list-row' },
-          el('span', { class: 'small mono muted', text: fmtShort(m.meeting_date) }),
-          el('a', { class: 'grow', href: `#/meeting/${m.id}`, text: m.title }),
-          el('span', { class: 'small muted', text: `${m.tasks} task${m.tasks === 1 ? '' : 's'}` }))))))));
+    ...reportBody(r, unit)));
 }
 
 /* ---------- Meeting detail ---------- */
@@ -1208,34 +1324,13 @@ async function renderMeeting(id) {
             : el('button', { type: 'button', class: 'btn btn-sm', onclick: () => setStatus(u.task_id, 'done') }, icon('tick', 14, 2.4), 'Mark done')) : null);
     }))) : null;
 
-  // Discussed, but nobody was given it: shown first so the PM doesn't miss it
-  const loose = m.unowned || [];
-  const openLoose = loose.filter((u) => u.status === 'open');
+  // Reminder: tasks of this meeting nobody was given yet (the PM chooses under "Action items")
   const noOwnerTasks = (m.tasks || []).filter((t) => t.status === 'open' && !t.jira_key && !t.merged_into
-    && !t.assignee_id && !t.assignee_email && (!t.assignee || /^(folësi|folesi|speaker)\b/i.test(t.assignee.trim())));
-  const handled = loose.filter((u) => u.status !== 'open');
-  const unownedCard = isManager() && (loose.length || noOwnerTasks.length) ? el('section', { class: `card stack${openLoose.length || noOwnerTasks.length ? ' card-warn' : ''}` },
-    el('div', { class: 'card-head' }, cardTitle('alert', 'Without an owner', 'yellow'),
-      el('span', { class: 'mono small muted', text: openLoose.length + noOwnerTasks.length })),
-    openLoose.length || noOwnerTasks.length
-      ? notice('warn', 'alert', 'Discussed in this meeting, but nobody was given it. Give each one to someone so it isn’t forgotten. It stays on ',
-        el('a', { href: '#/owners', text: 'Needs an owner' }), ' until then.')
-      : el('p', { class: 'small subtle', text: 'Everything discussed here has an owner now.' }),
-    openLoose.map((u) => (m.can_manage ? unownedItem(u, reloadMeeting, { showMeeting: false })
-      : el('div', { class: 'unowned' }, el('div', { class: 'unowned-head' }, icon('alert', 16, 2), el('b', { text: u.description }))))),
-    noOwnerTasks.length ? el('p', { class: 'small' }, icon('user', 14, 2),
-      ` ${noOwnerTasks.length} action item${noOwnerTasks.length === 1 ? ' has' : 's have'} no assignee: `,
-      noOwnerTasks.map((t) => t.description).join(' · '), '. Choose who does it under “Action items”.') : null,
-    handled.length ? el('details', { class: 'sources' },
-      el('summary', { text: `Handled (${handled.length})` }),
-      el('ul', {}, handled.map((u) => el('li', {},
-        el('span', { text: u.description }),
-        el('span', { class: 'small subtle', text: u.status === 'assigned'
-          ? ` — given to ${u.assignee_name || 'someone'}${u.jira_key ? ` (${u.jira_key})` : ''}${u.resolved_note ? ` · ${u.resolved_note}` : ''}`
-          : ` — not needed${u.resolved_note ? `: ${u.resolved_note}` : ''}` }),
-        u.status === 'dismissed' && m.can_manage ? el('button', { type: 'button', class: 'btn btn-sm', style: { marginLeft: '8px' }, onclick: async () => {
-          try { await api(`/api/owners/${u.id}/restore`, { method: 'POST' }); refreshOpenCount(); reloadMeeting(); } catch (e) { toast(e.message); }
-        } }, 'Restore') : null)))) : null) : null;
+    && !t.assignee_id && !t.assignee_email && (!t.assignee || /^(folësi|folesi|speaker)/i.test(t.assignee.trim())));
+  const unownedCard = isManager() && noOwnerTasks.length
+    ? notice('warn', 'user', el('strong', { text: `Reminder: ${noOwnerTasks.length} task${noOwnerTasks.length === 1 ? '' : 's'} without an assignee. ` }),
+      'Choose who does ', noOwnerTasks.length === 1 ? 'it' : 'them', ' under “Action items”.')
+    : null;
 
   if (m.summary !== null && m.summary !== undefined) {
     side.append(...nn(
@@ -1517,6 +1612,18 @@ function employeeForm(emp, reload) {
   });
 }
 
+/* Recording a room, not a call: the browser's call processing (echo cancellation, noise suppression,
+   automatic gain) is made for one person close to the microphone. In a room it removes or muffles the
+   people further away, so Whisper and the speaker detection get much worse audio. Voice samples use
+   the same settings, so a person's sample sounds like they do in a meeting. */
+const ROOM_AUDIO = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } };
+const REC_BITRATE = 128000;
+
+function roomRecorder(stream) {
+  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+  return new MediaRecorder(stream, { ...(type ? { mimeType: type } : {}), audioBitsPerSecond: REC_BITRATE });
+}
+
 /** A record button + an upload button. send(blob, filename) gets the audio; minSecs guards short takes. */
 function voiceRecorder({ label, minSecs, hint, send, status }) {
   const recBtn = el('button', { type: 'button', class: 'btn btn-sm' }, icon('mic', 16, 2), label);
@@ -1532,10 +1639,9 @@ function voiceRecorder({ label, minSecs, hint, send, status }) {
   recBtn.addEventListener('click', async () => {
     if (r) { r.recorder.stop(); return; }
     let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    try { stream = await navigator.mediaDevices.getUserMedia(ROOM_AUDIO); }
     catch { status.textContent = 'Microphone access was denied. Allow it in the browser, or upload a recording.'; return; }
-    const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
-    r = { recorder: new MediaRecorder(stream, type ? { mimeType: type } : undefined), chunks: [], started: Date.now() };
+    r = { recorder: roomRecorder(stream), chunks: [], started: Date.now() };
     r.recorder.ondataavailable = (ev) => ev.data.size && r.chunks.push(ev.data);
     r.recorder.onstop = () => {
       clearInterval(r.timer);
@@ -1628,6 +1734,57 @@ async function renderVoices() {
         el('button', { type: 'button', class: 'btn btn-sm', onclick: () => employeeForm(e, reload) }, 'Edit')));
   });
 
+  // Carry the voices to another PM's laptop: a file encrypted with a passphrase
+  const shareStatus = el('div', { class: 'small subtle' });
+  const pass = el('input', { type: 'password', minlength: '12', maxlength: '200', autocomplete: 'new-password',
+    placeholder: 'Passphrase, at least 12 characters' });
+  const fileIn = el('input', { type: 'file', accept: '.syncupvoices,text/plain' });
+  const needPass = () => {
+    if (pass.value.length < 12) { toast('Write a passphrase of at least 12 characters.'); pass.focus(); return false; }
+    return true;
+  };
+  const exportBtn = el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
+    if (!needPass()) return;
+    exportBtn.disabled = true;
+    try {
+      const r = await api('/api/voices/export', { method: 'POST', body: JSON.stringify({ passphrase: pass.value }) });
+      const url = URL.createObjectURL(new Blob([r.data], { type: 'text/plain' }));
+      const a = el('a', { href: url, download: r.filename });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      shareStatus.textContent = `${r.count} voice${r.count === 1 ? '' : 's'} saved to ${r.filename}. Give the file and the passphrase to the other PM separately.`;
+    } catch (err) { toast(err.message); } finally { exportBtn.disabled = false; }
+  } }, 'Export voices');
+  const importBtn = el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
+    if (!fileIn.files.length) { toast('Choose the voices file first.'); return; }
+    if (!needPass()) return;
+    importBtn.disabled = true;
+    shareStatus.textContent = 'Importing…';
+    try {
+      const fd = new FormData();
+      fd.append('file', fileIn.files[0]);
+      fd.append('passphrase', pass.value);
+      const r = await api('/api/voices/import', { method: 'POST', body: fd });
+      pass.value = '';
+      toast(`${r.imported} voice${r.imported === 1 ? '' : 's'} imported.`);
+      await reload();
+      // reload() repaints the page: show the result in the new card
+      const s = document.getElementById('voice-share-status');
+      if (s) s.textContent = `${r.imported} imported, ${r.created} new people added to the employee list, `
+        + `${r.kept} already known here${r.skipped.length ? `, ${r.skipped.length} skipped (${r.skipped.join('; ')})` : ''}.`;
+    } catch (err) { shareStatus.textContent = ''; toast(err.message); } finally { importBtn.disabled = false; }
+  } }, 'Import voices');
+  shareStatus.id = 'voice-share-status';
+  const shareCard = el('section', { class: 'card' },
+    el('h2', { text: 'Share voices with another PM' }),
+    el('p', { class: 'small muted', text: 'Every PM runs SyncUp on their own laptop. Export the voices here into a file locked with a passphrase, '
+      + 'then import that file on the other laptop. People are matched by their work email; anyone missing is added to that laptop’s employee list.' }),
+    el('div', { class: 'field-grid' },
+      field('Passphrase', pass, { wide: true, hint: 'Needed for both export and import. Send it separately from the file (e.g. tell it in person), never in the same email.' }),
+      field('Voices file (for import)', fileIn, { wide: true })),
+    el('div', { class: 'actions' }, exportBtn, importBtn),
+    shareStatus);
+
   view.replaceChildren(el('div', { class: 'page' },
     pageHead('Settings', 'Voice recognition'),
     el('p', { class: 'muted', text: 'Each person records about 30 seconds of their voice once. After that their name appears in meeting transcripts by itself, instead of “Folësi 1, 2…”.' }),
@@ -1637,6 +1794,7 @@ async function renderVoices() {
       voiceRecorder({ label: 'Record a test', minSecs: 5, status: testStatus, send: testSend,
         hint: 'Talk normally for 5–15 seconds, then press Stop.' }),
       testStatus),
+    shareCard,
     el('section', { class: 'card', style: { gap: 0 } },
       el('h2', { text: `People (${ready} of ${people.length} ready)` }),
       people.length ? rows : el('div', { class: 'empty' }, el('strong', { text: 'No people yet' }), 'Add people on the Team page first.')),
@@ -1655,7 +1813,7 @@ function groupForm(kind, group, reload, presetTeamId = null) {
 
   let members;
   let membersSlot = el('div', { class: 'field field-wide' });
-  const pmSel = kind === 'project' ? el('select', {}) : null;
+  const pmSel = null;  // the PM who creates a project is its PM (each PM has their own projects)
   const jiraKey = kind === 'project' ? el('input', { type: 'text', value: g.jira_key || '', maxlength: '10', placeholder: 'e.g. PAY',
     style: { textTransform: 'uppercase' } }) : null;
   const paintMembers = () => {
@@ -2160,11 +2318,17 @@ async function renderTickets(host, tab, recount) {
       },
     }, icon('jira', 14, 2.2), 'Send to Jira');
 
-    return el('article', { class: 'card ticket' }, head, ...body,
+    // The assignee chosen in Tasks goes with the ticket: only show the picker when there is none
+    // (e.g. a ticket made from tasks of different people), or when the PM wants to change it
+    const picker = el('div', { class: 'stack', style: { gap: '6px' }, hidden: !!t.recipient_email },
       el('label', { class: 'field recipient' }, 'Assignee', person, other),
-      el('p', { class: 'small subtle', text: t.recipient_email
-        ? `The Jira ticket is assigned to ${t.recipient_email} and the email goes there.`
-        : `Choose who gets this ticket. The list has the people with an email on Settings → Team.` }),
+      el('p', { class: 'small subtle', text: 'Choose who gets this ticket. The list has the people with an email on Settings → Team.' }));
+    const goesTo = t.recipient_email ? el('p', { class: 'small' }, icon('user', 14, 2),
+      ` Goes to ${known ? known.full_name : t.recipient_email} (${t.recipient_email}), the assignee from Tasks. `,
+      el('button', { type: 'button', class: 'btn-link small', onclick: (e) => { picker.hidden = false; e.currentTarget.parentElement.hidden = true; } }, 'Change')) : null;
+
+    return el('article', { class: 'card ticket' }, head, ...body,
+      goesTo, picker,
       errors[t.id] ? el('p', { class: 'jira-error', text: errors[t.id] }) : (t.jira_error ? el('p', { class: 'jira-error', text: `Jira: ${t.jira_error}` }) : null),
       el('div', { class: 'ticket-actions' },
         el('button', { type: 'button', class: 'btn btn-sm', title: 'Change the title, details, due date or quote',
@@ -2261,7 +2425,7 @@ async function renderVocabulary() {
 }
 
 /** Who is "Folësi 2"? The PM picks the person; if they agreed, their voice is learned. */
-function speakerForm(m, s) {
+function speakerForm(m, s, after = () => renderMeeting(m.id)) {
   const people = state.org.employees.filter((e) => e.active);
   const typed = !s.employee_id && s.name !== s.label;  // a name typed earlier (someone not on the team)
   const sel = el('select', { required: false },
@@ -2295,7 +2459,7 @@ function speakerForm(m, s) {
         body: JSON.stringify(isOther ? { name: other.value.trim() } : { employee_id: sel.value ? Number(sel.value) : null }) });
       toast(r.learned ? `${s.label} is ${r.name}. Voice learned: next time it’s automatic. Use “Analyze again” so the AI uses the name.`
         : `${s.label} is ${r.name}.`);
-      await renderMeeting(m.id);
+      await after();
     },
   });
 }
@@ -2399,6 +2563,30 @@ async function renderStandup(id) {
   const retry = s.can_manage && s.status === 'error' ? el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
     try { await api(`/api/meetings/${id}/retry`, { method: 'POST' }); route(); } catch (e) { toast(e.message); }
   } }, icon('retry', 14, 2), 'Try again') : null;
+  // Who each voice is: unnamed voices ("Folësi 3") and voices recognized automatically can be
+  // named or corrected here; the name then replaces the label in this report as well.
+  const speakers = s.speakers || [];
+  const askWho = async (sp) => {
+    try { await loadOrg(); } catch (e) { toast(e.message); return; }
+    speakerForm(s, sp, () => renderStandup(id));
+  };
+  const nameButton = (person) => {
+    const sp = speakers.find((x) => x.label === person && !x.employee_id);
+    return sp ? el('button', { type: 'button', class: 'btn btn-sm', onclick: () => askWho(sp) }, icon('user', 14, 2), `Who is ${sp.label}?`) : null;
+  };
+  const rewrite = s.can_manage && !busy && state.status.claude ? el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
+    try { await api(`/api/meetings/${id}/retry`, { method: 'POST' }); route(); } catch (e) { toast(e.message); }
+  } }, icon('retry', 14, 2), 'Write the report again') : null;
+  const speakersCard = speakers.length ? el('section', { class: 'card', 'aria-label': 'Who spoke' },
+    el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: `Who spoke (${speakers.length} voices)` }),
+      el('div', { class: 'actions' }, rewrite)),
+    el('p', { class: 'small subtle', text: 'Names marked “voice” were recognized automatically: check them. Click a voice to name or correct it, then “Write the report again” so the AI uses the names.' }),
+    el('div', { class: 'speakers' }, speakers.map((sp) => el('button', {
+      type: 'button', class: `speaker speaker-btn${sp.employee_id ? ' known' : ''}`,
+      title: sp.source === 'voice' ? `Recognized by voice (${Math.round(sp.similarity * 100)}% similar). Click to change.`
+        : sp.employee_id ? 'Named by you. Click to change.' : 'Who is this? Click to choose the person.',
+      onclick: () => askWho(sp) },
+      sp.name, sp.source === 'voice' ? el('span', { class: 'speaker-tag', text: 'voice' }) : null)))) : null;
   view.replaceChildren(el('div', { class: 'page' },
     el('a', { href: '#/standups', class: 'small' }, icon('back', 14, 2), ' Daily standups'),
     pageHead([fmtLong(s.meeting_date), s.project_name || s.team_name].filter(Boolean).join(' · '), s.title,
@@ -2406,77 +2594,26 @@ async function renderStandup(id) {
     busy ? el('section', { class: 'card' }, el('div', { class: 'thinking' }, el('span', { class: 'spinner' }), s.note || 'Processing…')) : null,
     s.status === 'error' ? notice('error', 'alert', s.error || 'Processing failed.', ' ', retry) : null,
     s.status === 'needs_key' ? notice('warn', 'key', s.note || 'Add an AI key to write the report.') : null,
+    !busy && s.unclear_share >= UNCLEAR_WARN ? notice('warn', 'alert',
+      `About ${Math.round(s.unclear_share * 100)}% of this recording could not be understood, so the report is incomplete. `
+      + 'Usually the people were too far from the microphone or spoke at the same time. Next time put the laptop in the middle of the table or use an external microphone, and let one person speak at a time.') : null,
     s.summary ? el('section', { class: 'card' },
       el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Summary' }),
         el('div', { class: 'actions' }, Object.entries(counts).filter(([, n]) => n).map(([k, n]) => el('span', { class: `stage ${STANDUP_STATUS[k][1]}`, text: `${n} ${STANDUP_STATUS[k][0].toLowerCase()}` })))),
       el('p', { class: 'summary', text: s.summary })) : null,
     s.updates.length ? el('div', { class: 'su-grid' }, s.updates.map((u) => el('article', { class: 'card su-person' },
-      el('div', { class: 'su-head' }, el('h3', { class: 'grow', text: u.name }), standupStatus(u.status, u.status_reason)),
+      el('div', { class: 'su-head' }, el('h3', { class: 'grow', text: u.name }),
+        u.unclear ? el('span', { class: 'stage', text: 'Not clear' }) : standupStatus(u.status, u.status_reason)),
       u.status_reason ? el('p', { class: 'small subtle', text: u.status_reason }) : null,
+      nameButton(u.person),
       ...standupLists(u),
       u.quote ? el('p', { class: 'quote', text: `“${u.quote}”` }) : null)))
-      : (!busy && s.status === 'done' ? el('section', { class: 'card' }, el('div', { class: 'empty' }, el('strong', { text: 'No updates found' }), 'Nobody gave an update in this recording.')) : null)));
+      : (!busy && s.status === 'done' ? el('section', { class: 'card' }, el('div', { class: 'empty' }, el('strong', { text: 'No updates found' }), 'Nobody gave an update in this recording.')) : null),
+    speakersCard));
   if (busy) poll(async () => { const x = await api(`/api/standups/${id}`); if (!isBusy(x)) { stopPolling(); route(); } });
 }
 
-/* ================= Needs an owner ================= */
-
-/** One issue the meeting talked about but nobody took on: give it to someone, or "Not needed". */
-function unownedItem(u, onDone, { showMeeting = true } = {}) {
-  const people = state.org.employees.filter((e) => e.active);
-  const who = el('select', { 'aria-label': `Who takes: ${u.description}` },
-    el('option', { value: '', text: '— Choose who takes it —' }),
-    people.map((e) => el('option', { value: String(e.id), text: e.full_name })));
-  const due = el('input', { type: 'date', 'aria-label': 'Due date (optional)', title: 'Due date (optional)' });
-  const give = el('button', { type: 'button', class: 'btn btn-sm btn-primary', disabled: true }, icon('user', 14, 2), 'Give to');
-  who.addEventListener('change', () => { give.disabled = !who.value; });
-  give.addEventListener('click', async () => {
-    give.disabled = true;
-    try {
-      const t = await api(`/api/owners/${u.id}/assign`, { method: 'POST', body: JSON.stringify({ employee_id: Number(who.value), due_date: due.value || null }) });
-      toast(`Given to ${t.assignee_name}. It is a task now: make it a ticket when you are ready.`);
-      refreshOpenCount();
-      await onDone();
-    } catch (e) { toast(e.message); give.disabled = false; }
-  });
-  const skip = el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
-    const note = prompt('Why is it not needed? (optional)', '');
-    if (note === null) return;
-    try {
-      await api(`/api/owners/${u.id}/dismiss`, { method: 'POST', body: JSON.stringify({ note }) });
-      toast('Marked as not needed.');
-      refreshOpenCount();
-      await onDone();
-    } catch (e) { toast(e.message); }
-  } }, 'Not needed');
-  return el('div', { class: 'unowned' },
-    el('div', { class: 'unowned-head' }, icon('alert', 16, 2), el('b', { class: 'grow', text: u.description })),
-    u.why ? el('p', { class: 'small', text: u.why }) : null,
-    u.quote ? el('p', { class: 'quote', text: `“${u.quote}”` }) : null,
-    showMeeting ? el('p', { class: 'small subtle' }, 'From ',
-      el('a', { href: `#/meeting/${u.meeting_id}`, text: `${u.meeting_title} (${fmtShort(u.meeting_date)})` }),
-      u.project_name ? ` · ${u.project_name}` : '') : null,
-    el('div', { class: 'unowned-actions' }, who, due, give, el('span', { class: 'spacer' }), skip));
-}
-
-async function renderOwners() {
-  const [data] = await Promise.all([api('/api/owners'), loadOrg()]);
-  const reload = async () => { refreshOpenCount(); await renderOwners(); };
-  const n = data.issues.length + data.tasks.length;
-  view.replaceChildren(el('div', { class: 'page' },
-    pageHead('Don’t forget', 'Needs an owner'),
-    el('p', { class: 'muted', text: 'Work the meetings said must be done, but nobody was given it. It stays here until you give it to someone or mark it “Not needed”. When someone takes on the same work in a later meeting, it is closed automatically.' }),
-    n ? null : el('div', { class: 'empty' }, el('strong', { text: 'Everything has an owner' }), 'Nothing discussed in the meetings is left without someone responsible.'),
-    data.issues.length ? el('section', { class: 'card stack' },
-      el('div', { class: 'card-head' }, cardTitle('alert', 'Discussed, nobody took it on', 'yellow'),
-        el('span', { class: 'mono small muted', text: data.issues.length })),
-      data.issues.map((u) => unownedItem(u, reload))) : null,
-    data.tasks.length ? el('section', { class: 'card', style: { gap: '4px' } },
-      el('div', { class: 'card-head' }, cardTitle('user', 'Tasks without an assignee', 'yellow'),
-        el('span', { class: 'mono small muted', text: data.tasks.length })),
-      el('p', { class: 'small subtle', text: 'Choose who does it. The AI couldn’t tell who took it on (or only heard a speaker label).' }),
-      el('div', {}, data.tasks.map((t) => taskRow(t, { showMeeting: true, assignable: true, onChange: reload })))) : null));
-}
+const UNCLEAR_WARN = 0.25;  // share of the speech Whisper could not make out before the report warns
 
 /* ================= Outbox (emails) ================= */
 
@@ -2529,6 +2666,10 @@ const AUDIT = {
   'voice.consent_given': ['Voice consent recorded', 'warn'], 'voice.consent_withdrawn': ['Voice consent withdrawn', 'warn'],
   'voice.profile_delete': ['Deleted voice profile', 'warn'], 'voice.enrolled': ['Added a voice sample', 'warn'],
   'voice.test': ['Tested voice recognition', 'work'], 'voice.speaker_named': ['Named a speaker', 'work'],
+  'calendar.connect_started': ['Started connecting Google Calendar', 'work'], 'calendar.connected': ['Connected Google Calendar', 'warn'],
+  'calendar.connect_denied': ['Google Calendar access refused', 'work'], 'calendar.connect_failed': ['Google Calendar connection failed', 'error'],
+  'calendar.disconnected': ['Disconnected Google Calendar', 'warn'],
+  'calendar.meeting_created': ['Created an online meeting (Google Meet)', 'warn'], 'calendar.meeting_cancelled': ['Cancelled an online meeting', 'warn'], 'calendar.meeting_failed': ['Online meeting not created', 'error'],
 };
 
 async function renderSecurity() {
@@ -2638,8 +2779,136 @@ function fillMeetingGroups() {
   paintProjects();
 }
 
+/* ---------- Google Calendar (read only) ---------- */
+
+const cal = { account: undefined };
+
+async function calendarAccount(force = false) {
+  if (!state.status.calendar || !isManager()) return null;
+  if (cal.account === undefined || force) {
+    try { cal.account = (await api('/api/calendar')).account; } catch { cal.account = null; }
+  }
+  return cal.account;
+}
+
+async function connectCalendar() {
+  try {
+    const { url } = await api('/api/calendar/connect', { method: 'POST' });
+    location.href = url;  // Google's sign-in page; it sends you back to the app
+  } catch (e) { toast(e.message); }
+}
+
+async function disconnectCalendar() {
+  if (!confirm('Disconnect Google Calendar? The app loses access to your calendar (you can connect it again any time).')) return;
+  try {
+    await api('/api/calendar', { method: 'DELETE' });
+    cal.account = null;
+    toast('Google Calendar disconnected.');
+    route();
+  } catch (e) { toast(e.message); }
+}
+
+function calTime(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** The "From Google Calendar" choice in the New meeting dialog. */
+async function fillCalendar(preselect = null) {
+  const box = document.getElementById('f-cal');
+  const connect = document.getElementById('f-cal-connect');
+  const sel = document.getElementById('f-event');
+  const hint = document.getElementById('f-event-hint');
+  const dateInput = document.getElementById('f-date');
+  const account = await calendarAccount();
+  if (!state.status.calendar || !isManager()) return;
+  if (!account) { box.hidden = true; connect.hidden = false; return; }
+  connect.hidden = true;
+  box.hidden = false;
+  if (preselect) dateInput.value = preselect.start.slice(0, 10);
+  const load = async (pick) => {
+    hint.textContent = '';
+    sel.disabled = true;
+    sel.replaceChildren(el('option', { value: '', text: 'Loading your calendar…' }));
+    let events = [];
+    try {
+      events = await api(`/api/calendar/events?day=${encodeURIComponent(dateInput.value || state.today)}`);
+    } catch (e) {
+      sel.replaceChildren(el('option', { value: '', text: 'Could not load the calendar' }));
+      hint.textContent = e.message;
+      return;
+    }
+    sel.disabled = false;
+    sel.replaceChildren(
+      el('option', { value: '', text: events.length ? 'Choose the meeting from your calendar (optional)…' : 'No meetings in your calendar on this day' }),
+      ...events.map((ev) => el('option', { value: ev.id, text: `${calTime(ev.start)}–${ev.end ? calTime(ev.end) : ''}  ${ev.title}` })));
+    sel.onchange = () => applyCalendarEvent(events.find((ev) => ev.id === sel.value));
+    const found = pick && events.find((ev) => ev.id === pick.id);
+    if (found) { sel.value = found.id; applyCalendarEvent(found); }
+  };
+  dateInput.onchange = () => load(null);
+  await load(preselect);
+}
+
+function applyCalendarEvent(ev) {
+  const hint = document.getElementById('f-event-hint');
+  const speakers = document.getElementById('f-speakers');
+  if (!ev) { hint.textContent = ''; speakers.placeholder = 'Not sure'; return; }
+  document.getElementById('f-title').value = ev.title;
+  // Invited is not the same as spoke (the number splits the voices exactly): only a hint
+  speakers.placeholder = ev.speakers ? `${ev.speakers} invited` : 'Not sure';
+  const projSel = document.getElementById('f-project');
+  if (ev.project_id && [...projSel.options].some((o) => o.value === String(ev.project_id))) {
+    projSel.value = String(ev.project_id);
+    if (projSel.onchange) projSel.onchange();
+  }
+  const names = ev.people.map((p) => p.name);
+  hint.textContent = names.length
+    ? `Invited (${names.length}): ${names.slice(0, 8).join(', ')}${names.length > 8 ? '…' : ''}. Below, enter how many of them actually spoke.`
+    : '';
+}
+
+document.getElementById('f-cal-btn').addEventListener('click', connectCalendar);
+
+/** Home: today's meetings from the PM's Google Calendar. */
+function calendarCard() {
+  const card = el('section', { class: 'card', 'aria-label': 'Today in your calendar', style: { gap: '4px' } });
+  (async () => {
+    const account = await calendarAccount();
+    if (!account) {
+      card.append(cardTitle('calendar', 'Google Calendar'),
+        el('p', { class: 'small muted', text: 'Connect your calendar to see today’s meetings here and fill in a new meeting (title, date, project, who was invited) with one click, and create online meetings with a Google Meet link. The app never changes your existing events.' }),
+        el('div', { class: 'actions' }, el('button', { type: 'button', class: 'btn', onclick: connectCalendar }, icon('calendar', 16, 2), 'Connect Google Calendar')));
+      return;
+    }
+    card.append(el('div', { class: 'card-head', style: { marginBottom: '8px' } }, cardTitle('calendar', 'Today in your calendar'),
+      el('button', { type: 'button', class: 'btn-link small', title: account.email || '', onclick: disconnectCalendar, text: 'Disconnect' })));
+    let events;
+    try { events = await api(`/api/calendar/events?day=${state.today}`); } catch (e) {
+      card.append(el('p', { class: 'small form-error', text: e.message }));
+      if (/connect the calendar again/i.test(e.message)) {
+        cal.account = null;
+        card.append(el('div', { class: 'actions' }, el('button', { type: 'button', class: 'btn', onclick: connectCalendar, text: 'Connect again' })));
+      }
+      return;
+    }
+    if (!events.length) { card.append(el('div', { class: 'empty' }, el('strong', { text: 'No meetings today' }), 'Meetings in your Google Calendar appear here.')); return; }
+    const now = Date.now();
+    card.append(...events.map((ev) => el('div', { class: 'cal-row' },
+      el('span', { class: 'mono small subtle', text: `${calTime(ev.start)}–${ev.end ? calTime(ev.end) : ''}` }),
+      el('span', { class: 'cal-title' }, el('strong', { text: ev.title }),
+        el('small', { class: 'subtle', text: ev.people.length ? `${ev.people.length} invited` : '' })),
+      el('span', { class: 'cal-actions' },
+        ev.meet_link && (!ev.end || new Date(ev.end).getTime() > now)
+          ? el('a', { class: 'btn', href: ev.meet_link, target: '_blank', rel: 'noopener noreferrer' }, icon('video', 14, 2), 'Join') : null,
+        new Date(ev.start).getTime() <= now
+          ? el('button', { type: 'button', class: 'btn', onclick: () => openUpload('file', 'meeting', ev) }, icon('upload', 14, 2), 'Add recording')
+          : el('button', { type: 'button', class: 'btn', onclick: () => openUpload('record', 'meeting', ev) }, el('span', { class: 'rec-dot' }), 'Record')))));
+  })();
+  return card;
+}
+
 /** kind: 'meeting' or 'standup' (a daily standup is a report per person, never tasks). */
-function openUpload(startMode = 'file', kind = 'meeting') {
+function openUpload(startMode = 'file', kind = 'meeting', event = null) {
   form.reset();
   errBox.textContent = '';
   document.getElementById('f-date').value = state.today;
@@ -2653,28 +2922,33 @@ function openUpload(startMode = 'file', kind = 'meeting') {
   kindSel.onchange = paintKind;
   paintKind();
   if (state.org) fillMeetingGroups();
-  loadOrg().then(fillMeetingGroups).catch((e) => { errBox.textContent = `Could not load the teams and projects: ${e.message}`; });
+  document.getElementById('f-cal').hidden = true;
+  document.getElementById('f-cal-connect').hidden = true;
+  document.getElementById('f-speakers').placeholder = 'Not sure';
+  loadOrg().then(() => { fillMeetingGroups(); fillCalendar(event); })
+    .catch((e) => { errBox.textContent = `Could not load the teams and projects: ${e.message}`; });
   const sel = document.getElementById('f-model');
   sel.replaceChildren(...state.status.models.map((m) => el('option', { value: m, text: m, selected: m === state.status.default_model })));
   document.getElementById('f-model-hint').textContent = state.status.gpu
     ? 'GPU found: large-v3 gives the best accuracy.'
-    : '“large-v3” is recommended for Albanian (most accurate). Without a GPU it is slow: a 1-hour meeting can take about 1–2 hours. “large-v3-turbo” is several times faster with slightly lower accuracy. “small” makes many mistakes in Albanian.';
+    : '“large-v3-turbo” is recommended: about 3 times faster than “large-v3” on this computer and just as accurate for Albanian. “large-v3” is much slower without a GPU. “small” makes many mistakes in Albanian.';
   setMode(startMode);
   dlg.showModal();
 }
 
 async function startRecording() {
   try {
-    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    rec.stream = await navigator.mediaDevices.getUserMedia(ROOM_AUDIO);
   } catch (e) {
     errBox.textContent = 'Microphone access was denied. Allow it in the browser and try again.';
     return;
   }
-  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
-  rec.recorder = new MediaRecorder(rec.stream, type ? { mimeType: type } : undefined);
+  rec.recorder = roomRecorder(rec.stream);
   rec.chunks = [];
   rec.recorder.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
+  startMeter(rec.stream);
   rec.recorder.onstop = () => {
+    stopMeter();
     rec.stream.getTracks().forEach((t) => t.stop());
     if (rec.discard) { rec.discard = false; return; }
     const ext = (rec.recorder.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
@@ -2691,8 +2965,46 @@ async function startRecording() {
   rec.timer = setInterval(() => { document.getElementById('rec-time').textContent = fmtClock((Date.now() - rec.started) / 1000); }, 500);
 }
 
+/* Sound level while recording: if the microphone hears almost nothing for a while, say so right
+   away, while the standup can still be fixed (closer laptop, external microphone), not after it. */
+const QUIET_DB = -48;     // below this the room is basically silent for the microphone
+const QUIET_SECS = 10;
+function startMeter(stream) {
+  stopMeter();
+  const bar = document.getElementById('rec-meter'), warn = document.getElementById('rec-warn');
+  try {
+    const ctx = new AudioContext();
+    const an = ctx.createAnalyser();
+    an.fftSize = 2048;
+    ctx.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    let loudAt = Date.now();
+    bar.hidden = false;
+    rec.meter = { ctx, timer: setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const x of buf) sum += x * x;
+      const db = 10 * Math.log10(sum / buf.length + 1e-12);
+      bar.firstElementChild.style.width = `${Math.max(0, Math.min(100, ((db + 60) / 50) * 100))}%`;
+      if (db > QUIET_DB) loudAt = Date.now();
+      const quiet = (Date.now() - loudAt) / 1000 > QUIET_SECS;
+      bar.classList.toggle('low', quiet);
+      warn.hidden = !quiet;
+      warn.textContent = quiet ? 'The microphone hears almost nothing. Put the laptop in the middle of the table, or use an external microphone.' : '';
+    }, 200) };
+  } catch { bar.hidden = true; }  // no meter: recording still works
+}
+
+function stopMeter() {
+  if (rec.meter) { clearInterval(rec.meter.timer); rec.meter.ctx.close().catch(() => {}); rec.meter = null; }
+  const bar = document.getElementById('rec-meter'), warn = document.getElementById('rec-warn');
+  bar.hidden = true; bar.classList.remove('low'); bar.firstElementChild.style.width = '0';
+  warn.hidden = true;
+}
+
 function stopRecording(discard = false) {
   clearInterval(rec.timer);
+  stopMeter();
   recBtn.classList.remove('on');
   recBtn.setAttribute('aria-label', 'Start recording');
   if (rec.recorder && rec.recorder.state !== 'inactive') { rec.discard = discard; rec.recorder.stop(); }
@@ -2759,6 +3071,7 @@ let loginEmail = '';
 function showLogin() {
   stopPolling();
   state.me = null;
+  syncAssist();  // hide the meeting assistant and forget its conversation
   shellEl.hidden = true;
   loginEl.hidden = false;
   emailForm.hidden = false;
@@ -2823,6 +3136,10 @@ function tabSignedIn() { try { return sessionStorage.getItem(TAB_KEY) === '1'; }
 function markTab(on) { try { if (on) sessionStorage.setItem(TAB_KEY, '1'); else sessionStorage.removeItem(TAB_KEY); } catch { /* storage blocked */ } }
 
 async function start() {
+  // Asked together with "who am I", not after it: through a tunnel or a slow network every
+  // round trip counts. Signed out, they just fail and the sign-in page shows as before.
+  const early = Promise.all([loadStatus(), loadOrg()]);
+  early.catch(() => {});
   try {
     state.me = await api('/api/auth/me');
   } catch {
@@ -2844,11 +3161,473 @@ async function start() {
   document.getElementById('me-role').textContent = ROLE_LABEL[state.me.role] || state.me.role;
   document.getElementById('me-avatar').textContent = initials(state.me.full_name);
   try {
-    await Promise.all([loadStatus(), loadOrg()]);
+    await early.catch(() => Promise.all([loadStatus(), loadOrg()]));  // failed early (e.g. just signed in): ask again
     await route();
   } catch (e) {
     view.replaceChildren(el('div', { class: 'page' }, notice('error', 'alert', `The server is not responding: ${e.message}`)));
   }
 }
 
+
+/* ================= Meeting assistant (side panel): new online meeting with Google Meet ================= */
+
+const assist = { open: false, step: null, draft: null };
+
+const assistFab = el('button', { type: 'button', class: 'assist-fab', hidden: true, 'aria-label': 'New online meeting', title: 'New online meeting',
+  onclick: () => toggleAssist() }, icon('video', 22, 2));
+const assistLog = el('div', { class: 'assist-log', role: 'log', 'aria-live': 'polite' });
+const assistInput = el('div', { class: 'assist-input' });
+const assistPanel = el('aside', { class: 'assist', hidden: true, 'aria-label': 'Meeting assistant' },
+  el('header', { class: 'assist-head' },
+    el('span', { class: 'assist-avatar' }, icon('video', 18, 2)),
+    el('div', { class: 'assist-title' }, el('strong', { text: 'Meeting assistant' }), el('small', { text: 'Google Meet · invitations by email' })),
+    el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Start again', title: 'Start again', onclick: () => startAssist() }, icon('retry', 16, 2)),
+    el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => toggleAssist(false) }, icon('x', 16, 2))),
+  assistLog, assistInput);
+document.body.append(assistFab, assistPanel);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && assist.open && !document.querySelector('dialog[open]')) toggleAssist(false); });
+
+/** Show the button only to PMs/admins when Google Calendar is set up. Called after every page change. */
+function syncAssist() {
+  const show = Boolean(state.me && state.status && state.status.calendar && isManager());
+  assistFab.hidden = !show;
+  if (!show) {
+    toggleAssist(false);
+    assist.step = null;
+    assistLog.replaceChildren();
+    assistInput.replaceChildren();
+  }
+}
+
+function toggleAssist(open = !assist.open) {
+  assist.open = open;
+  assistPanel.hidden = !open;
+  assistFab.classList.toggle('on', open);
+  if (open && !assist.step) startAssist();
+}
+
+function bot(...content) {
+  const b = el('div', { class: 'bubble bot' }, ...content);
+  assistLog.append(b);
+  assistLog.scrollTop = assistLog.scrollHeight;
+  return b;
+}
+
+function said(text) {
+  assistLog.append(el('div', { class: 'bubble me', text }));
+  assistLog.scrollTop = assistLog.scrollHeight;
+}
+
+function typing() {
+  const t = el('div', { class: 'bubble bot typing', 'aria-label': 'Working…' }, el('i'), el('i'), el('i'));
+  assistLog.append(t);
+  assistLog.scrollTop = assistLog.scrollHeight;
+  return t;
+}
+
+const pad = (n) => String(n).padStart(2, '0');
+const localDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const localTime = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function fmtWhen(dateIso, time) {
+  const day = dateIso === state.today ? 'Today' : dateIso === localDate(new Date(Date.now() + 86400000)) ? 'Tomorrow' : fmtLong(dateIso);
+  return `${day} at ${time}`;
+}
+
+async function startAssist() {
+  assist.step = 'start';
+  assist.draft = { title: '', date: state.today, time: '', minutes: 30, guests: new Map(), description: '' };
+  assistLog.replaceChildren();
+  assistInput.replaceChildren();
+  const first = (state.me.full_name || '').split(' ')[0];
+  bot(`Hi ${first}! I set up online meetings with a Google Meet link. Everyone you invite gets the invitation by email and sees it in their calendar.`);
+  const t = typing();
+  const account = await calendarAccount(true);
+  t.remove();
+  if (!account || !account.can_create) {
+    bot(account ? 'To create meetings, Google needs one more permission. Connect again and allow “create its own calendar”: the app only manages the meetings it creates, nothing else in your calendar.'
+      : 'First connect your Google Calendar.',
+      el('div', { class: 'assist-actions' }, el('button', { type: 'button', class: 'btn btn-primary', onclick: connectCalendar }, icon('calendar', 16, 2),
+        account ? 'Connect again' : 'Connect Google Calendar')));
+    return;
+  }
+  askTitle();
+}
+
+function askTitle() {
+  assist.step = 'title';
+  bot('What is the meeting about?');
+  const input = el('input', { type: 'text', maxlength: 200, placeholder: 'e.g. Sprint planning', 'aria-label': 'Meeting title' });
+  const send = () => {
+    const v = input.value.trim();
+    if (!v) { input.focus(); return; }
+    assist.draft.title = v;
+    said(v);
+    askWhen();
+  };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+  assistInput.replaceChildren(
+    el('div', { class: 'chips' }, ['Weekly sync', 'Sprint planning', 'Client call', 'Retrospective'].map((s) =>
+      el('button', { type: 'button', class: 'chip', text: s, onclick: () => { input.value = s; send(); } }))),
+    el('div', { class: 'assist-row' }, input, el('button', { type: 'button', class: 'btn btn-primary send', 'aria-label': 'Send', onclick: send }, icon('arrow', 16, 2))));
+  input.focus();
+}
+
+function askWhen() {
+  assist.step = 'when';
+  bot('When, and for how long?');
+  const d = assist.draft;
+  const soon = new Date(Date.now() + 30 * 60000);
+  soon.setMinutes(Math.ceil(soon.getMinutes() / 15) * 15, 0, 0);
+  const dateIn = el('input', { type: 'date', value: d.date, min: state.today, 'aria-label': 'Date' });
+  const timeIn = el('input', { type: 'time', value: d.time || localTime(soon), step: 300, 'aria-label': 'Start time' });
+  let minutes = d.minutes;
+  const durChips = [15, 30, 45, 60, 90].map((m) => el('button', { type: 'button', class: `chip${m === minutes ? ' active' : ''}`, text: m < 60 ? `${m} min` : `${m / 60} h`.replace('1.5 h', '1½ h'),
+    onclick: (e) => { minutes = m; durChips.forEach((c) => c.classList.remove('active')); e.currentTarget.classList.add('active'); } }));
+  const quick = (label, fn) => el('button', { type: 'button', class: 'chip', text: label, onclick: () => { const x = fn(); dateIn.value = localDate(x); timeIn.value = localTime(x); } });
+  const err = el('p', { class: 'form-error small', role: 'alert' });
+  const next = () => {
+    if (!dateIn.value || !timeIn.value) { err.textContent = 'Choose the date and time.'; return; }
+    if (new Date(`${dateIn.value}T${timeIn.value}`) < new Date(Date.now() - 5 * 60000)) { err.textContent = 'That time has already passed.'; return; }
+    Object.assign(d, { date: dateIn.value, time: timeIn.value, minutes });
+    said(`${fmtWhen(d.date, d.time)} · ${durChips.find((c) => c.classList.contains('active')).textContent}`);
+    askWho();
+  };
+  assistInput.replaceChildren(
+    el('div', { class: 'chips' },
+      quick('In 15 min', () => { const x = new Date(Date.now() + 15 * 60000); x.setSeconds(0, 0); return x; }),
+      quick('In 1 hour', () => { const x = new Date(Date.now() + 3600000); x.setMinutes(Math.ceil(x.getMinutes() / 15) * 15, 0, 0); return x; }),
+      quick('Tomorrow 10:00', () => { const x = new Date(Date.now() + 86400000); x.setHours(10, 0, 0, 0); return x; })),
+    el('div', { class: 'assist-row' }, dateIn, timeIn),
+    el('div', { class: 'chips' }, el('span', { class: 'small subtle', text: 'Duration' }), durChips),
+    err,
+    el('div', { class: 'assist-actions' }, el('button', { type: 'button', class: 'btn btn-primary', onclick: next, text: 'Continue' })));
+}
+
+async function askWho() {
+  assist.step = 'who';
+  bot('Who should join? Pick a whole project, search for people, or type any email address.');
+  const d = assist.draft;
+  if (!state.org) { try { await loadOrg(); } catch { /* typed emails still work */ } }
+  const people = ((state.org && state.org.employees) || []).filter((e) => e.email && e.active !== false && e.id !== state.me.id);
+  const projects = ((state.org && state.org.projects) || []).filter((p) => isAdmin() || state.me.pm_project_ids.includes(p.id) || state.me.project_ids.includes(p.id));
+  const chosen = el('div', { class: 'chips guests' });
+  const err = el('p', { class: 'form-error small', role: 'alert' });
+  const nextBtn = el('button', { type: 'button', class: 'btn btn-primary' });
+  const paint = () => {
+    chosen.replaceChildren(...[...d.guests].map(([email, name]) => el('span', { class: 'chip active guest' }, name || email,
+      el('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${name || email}`, onclick: () => { d.guests.delete(email); paint(); } }, icon('x', 12, 2.4)))));
+    nextBtn.textContent = d.guests.size ? `Continue · ${d.guests.size} ${d.guests.size === 1 ? 'person' : 'people'}` : 'Continue';
+    nextBtn.disabled = !d.guests.size;
+  };
+  const add = (email, name) => { d.guests.set(email.toLowerCase(), name || null); paint(); };
+  const search = el('input', { type: 'text', placeholder: 'Name or email, then Enter', 'aria-label': 'Add a person', autocomplete: 'off' });
+  const results = el('div', { class: 'assist-results' });
+  const showResults = () => {
+    const q = search.value.trim().toLowerCase();
+    if (!q) { results.replaceChildren(); return; }
+    const hits = people.filter((e) => !d.guests.has(e.email.toLowerCase()) && (`${e.full_name} ${e.email}`).toLowerCase().includes(q)).slice(0, 6);
+    results.replaceChildren(...hits.map((e) => el('button', { type: 'button', class: 'assist-hit', onclick: () => { add(e.email, e.full_name); search.value = ''; results.replaceChildren(); search.focus(); } },
+      el('span', { class: 'avatar', style: { background: personColor(e.id) }, text: initials(e.full_name) }),
+      el('span', {}, el('strong', { text: e.full_name }), el('small', { class: 'subtle', text: e.email })))));
+  };
+  search.addEventListener('input', showResults);
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const v = search.value.trim().replace(/[,;]$/, '');
+    const first = results.querySelector('.assist-hit');
+    if (/^[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>"]+$/.test(v)) {
+      const known = people.find((p) => p.email.toLowerCase() === v.toLowerCase());
+      add(v, known && known.full_name);
+      search.value = ''; results.replaceChildren(); err.textContent = '';
+    } else if (first) first.click();
+    else if (v) err.textContent = 'Nobody found. Type a full email address to invite someone else.';
+  });
+  nextBtn.onclick = () => {
+    if (!d.guests.size) return;
+    const names = [...d.guests].map(([email, name]) => name || email);
+    said(names.length > 4 ? `${names.slice(0, 4).join(', ')} +${names.length - 4} more` : names.join(', '));
+    askNote();
+  };
+  assistInput.replaceChildren(...nn(
+    projects.length ? el('div', { class: 'chips' }, projects.map((p) => {
+      const members = people.filter((e) => p.member_ids.includes(e.id));
+      return members.length ? el('button', { type: 'button', class: 'chip', onclick: () => { d.project_id = p.id; members.forEach((e) => add(e.email, e.full_name)); } },
+        icon('users', 14, 2), ` ${p.name} (${members.length})`) : null;
+    })) : null,
+    chosen, search, results, err,
+    el('div', { class: 'assist-actions' }, nextBtn)));
+  paint();
+  search.focus();
+}
+
+function askNote() {
+  assist.step = 'note';
+  bot('Anything to add to the invitation? An agenda, for example. (optional)');
+  const area = el('textarea', { rows: 3, maxlength: 2000, placeholder: 'e.g. 1. Status  2. Blockers  3. Next steps', 'aria-label': 'Invitation text' });
+  const go = (skip) => {
+    assist.draft.description = skip ? '' : area.value.trim();
+    said(assist.draft.description || 'No, that’s all');
+    confirmAssist();
+  };
+  assistInput.replaceChildren(area,
+    el('div', { class: 'assist-actions' },
+      el('button', { type: 'button', class: 'btn', text: 'Skip', onclick: () => go(true) }),
+      el('button', { type: 'button', class: 'btn btn-primary', text: 'Continue', onclick: () => go(!area.value.trim()) })));
+  area.focus();
+}
+
+function confirmAssist() {
+  assist.step = 'confirm';
+  const d = assist.draft;
+  const names = [...d.guests].map(([email, name]) => name || email);
+  bot('Here is the meeting. Shall I create it and send the invitations?',
+    el('div', { class: 'assist-card' },
+      el('strong', { text: d.title }),
+      el('span', {}, icon('clock', 14, 2), ` ${fmtWhen(d.date, d.time)} · ${d.minutes} min`),
+      el('span', {}, icon('video', 14, 2), ' Google Meet link'),
+      el('span', {}, icon('users', 14, 2), ` ${names.length}: ${names.slice(0, 6).join(', ')}${names.length > 6 ? '…' : ''}`),
+      d.description ? el('span', { class: 'subtle' }, icon('file', 14, 2), ` ${d.description.length > 80 ? `${d.description.slice(0, 80)}…` : d.description}`) : null));
+  const create = el('button', { type: 'button', class: 'btn btn-primary' }, icon('mail', 16, 2), 'Create & send invitations');
+  create.onclick = async () => {
+    create.disabled = true;
+    said('Yes, create it');
+    assistInput.replaceChildren();
+    const t = typing();
+    try {
+      const r = await api('/api/calendar/meetings', { method: 'POST', body: JSON.stringify({
+        title: d.title, start: `${d.date}T${d.time}`, minutes: d.minutes, guests: [...d.guests.keys()], description: d.description || null,
+        project_id: d.project_id || null }) });
+      t.remove();
+      doneAssist(r);
+    } catch (e) {
+      t.remove();
+      bot(`I couldn’t create it: ${e.message}`);
+      confirmAssist();
+    }
+  };
+  assistInput.replaceChildren(el('div', { class: 'assist-actions' },
+    el('button', { type: 'button', class: 'btn', text: 'Change', onclick: () => { said('Let me change something'); askTitleAgain(); } }), create));
+}
+
+function askTitleAgain() {
+  // Start the questions again with the answers kept as defaults
+  const keep = assist.draft;
+  askTitle();
+  const input = assistInput.querySelector('input');
+  input.value = keep.title;
+  input.select();
+}
+
+function doneAssist(r) {
+  assist.step = 'done';
+  const copy = el('button', { type: 'button', class: 'btn' }, icon('file', 16, 2), 'Copy link');
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(r.meet_link); copy.lastChild.textContent = 'Copied'; } catch { toast('Copy the link by hand.'); }
+  };
+  bot(el('strong', { text: 'Done! ' }), `Invitations were emailed to ${r.guests} ${r.guests === 1 ? 'person' : 'people'}. The meeting is in their calendars, in your Gmail calendar and on the Meetings page here.`,
+    r.meet_link ? el('div', { class: 'assist-card' },
+      el('span', { class: 'small subtle', text: 'Google Meet' }),
+      el('a', { href: r.meet_link, target: '_blank', rel: 'noopener noreferrer', class: 'mono', text: r.meet_link.replace(/^https:\/\//, '') })) : null,
+    el('div', { class: 'assist-actions wrap' }, ...nn(
+      r.meet_link ? copy : null,
+      r.meet_link ? el('a', { class: 'btn btn-primary', href: r.meet_link, target: '_blank', rel: 'noopener noreferrer' }, icon('video', 16, 2), 'Open Meet') : null,
+      r.calendar_link ? el('a', { class: 'btn', href: r.calendar_link, target: '_blank', rel: 'noopener noreferrer' }, icon('calendar', 16, 2), 'In Calendar') : null)),
+    r.meet_link ? null : el('p', { class: 'small subtle', text: 'Google is still preparing the Meet link: it appears in the invitation.' }));
+  bot('After the meeting, record or upload it here and I’ll find it in your calendar.');
+  assistInput.replaceChildren(el('div', { class: 'assist-actions' }, el('button', { type: 'button', class: 'btn', onclick: () => startAssist() }, icon('plus', 16, 2), 'New meeting')));
+  if (location.hash === '' || location.hash === '#/' || location.hash.startsWith('#/?') || location.hash.startsWith('#/meetings')) route();  // refresh the lists
+}
+
 start();
+
+/* ================= Notes: private sticky notes ================= */
+
+const NOTE_COLORS = ['yellow', 'pink', 'green', 'blue', 'violet'];
+
+async function renderNotes() {
+  let list = await api('/api/notes');
+  const pending = new Map();  // note id -> save timer
+  const grid = el('div', { class: 'notes-grid' });
+  const search = el('input', { type: 'search', class: 'notes-search', placeholder: 'Search your notes', 'aria-label': 'Search your notes' });
+  const edited = (iso) => (iso.slice(0, 10) === state.today ? `Today ${iso.slice(11, 16)}` : `${fmtShort(iso.slice(0, 10))} ${iso.slice(11, 16)}`);
+  const flushAll = () => list.forEach((n) => n.flush && n.flush());
+
+  const patch = async (n, body) => {
+    const r = await api(`/api/notes/${n.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+    Object.assign(n, r);
+    return r;
+  };
+
+  const card = (n) => {
+    const area = el('textarea', { maxlength: 10000, placeholder: 'Write anything…', 'aria-label': 'Note' });
+    area.value = n.body;
+    const when = el('small', { class: 'note-when', text: edited(n.updated_at) });
+    const save = async () => {
+      clearTimeout(pending.get(n.id)); pending.delete(n.id);
+      if (area.value === n.body) return;
+      when.textContent = 'Saving…';
+      try { await patch(n, { body: area.value }); when.textContent = 'Saved'; } catch (e) { when.textContent = 'Not saved'; toast(e.message); }
+    };
+    area.addEventListener('input', () => { clearTimeout(pending.get(n.id)); pending.set(n.id, setTimeout(save, 700)); when.textContent = 'Editing…'; });
+    area.addEventListener('blur', save);
+    n.flush = save;
+    const box = el('article', { class: `sticky note-${n.color}${n.pinned ? ' pinned' : ''}`, 'data-id': n.id, 'data-pinned': n.pinned ? '1' : '0' });
+    const dots = NOTE_COLORS.map((c) => el('button', {
+      type: 'button', class: `note-dot note-${c}${c === n.color ? ' on' : ''}`, 'aria-label': `Colour: ${c}`, title: c,
+      onclick: async (e) => {
+        const dot = e.currentTarget;
+        try {
+          await patch(n, { color: c });
+          box.className = `sticky note-${c}${n.pinned ? ' pinned' : ''}`;
+          dots.forEach((d) => d.classList.toggle('on', d === dot));
+        } catch (ex) { toast(ex.message); }
+      } }));
+    box.append(
+      el('button', { type: 'button', class: `icon-btn note-pin${n.pinned ? ' is-on' : ''}`, 'aria-label': n.pinned ? 'Unpin' : 'Pin to the top', title: n.pinned ? 'Unpin' : 'Pin to the top',
+        onclick: async () => { await save(); try { await patch(n, { pinned: !n.pinned }); list = await api('/api/notes'); paint(); } catch (e) { toast(e.message); } } }, icon('pin', 16, 2)),
+      grip(n, box),
+      area,
+      el('footer', {},
+        el('span', { class: 'note-dots' }, dots),
+        when,
+        el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Delete note', title: 'Delete',
+          onclick: async () => {
+            if (area.value.trim() && !confirm('Delete this note?')) return;
+            clearTimeout(pending.get(n.id)); pending.delete(n.id);
+            try { await api(`/api/notes/${n.id}`, { method: 'DELETE' }); list = list.filter((x) => x !== n); paint(); } catch (e) { toast(e.message); }
+          } }, icon('trash', 16, 2))));
+    n.box = box;
+    return box;
+  };
+
+  // Drag & drop (mouse) or the arrow keys on the handle: pinned notes move among the pinned ones
+  let dragged = null;
+  const saveOrder = async () => {
+    const ids = [...grid.querySelectorAll('.sticky')].map((b) => Number(b.dataset.id));
+    list.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+    try { await api('/api/notes/order', { method: 'PUT', body: JSON.stringify({ ids }) }); } catch (e) { toast(e.message); }
+  };
+  const grip = (n, box) => {
+    const g = el('button', { type: 'button', class: 'note-grip', 'aria-label': 'Move the note (arrow keys)', title: 'Drag to move' }, icon('grip', 16, 2));
+    g.addEventListener('pointerdown', () => { box.draggable = true; });
+    g.addEventListener('pointerup', () => { box.draggable = false; });
+    g.addEventListener('keydown', (e) => {
+      const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+      if (!back && e.key !== 'ArrowRight' && e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      const other = back ? box.previousElementSibling : box.nextElementSibling;
+      if (!other || other.dataset.pinned !== box.dataset.pinned) return;
+      if (back) other.before(box); else other.after(box);
+      g.focus();
+      saveOrder();
+    });
+    box.addEventListener('dragstart', (e) => {
+      if (!box.draggable) { e.preventDefault(); return; }
+      dragged = box; box.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', '');
+    });
+    box.addEventListener('dragend', () => {
+      box.classList.remove('dragging'); box.draggable = false; dragged = null;
+      saveOrder();
+    });
+    return g;
+  };
+  grid.addEventListener('dragover', (e) => {
+    if (!dragged) return;
+    e.preventDefault();
+    const over = e.target.closest('.sticky');
+    if (!over || over === dragged || over.dataset.pinned !== dragged.dataset.pinned) return;
+    const r = over.getBoundingClientRect();
+    if (e.clientX < r.left + r.width / 2) over.before(dragged); else over.after(dragged);
+  });
+  grid.addEventListener('drop', (e) => { if (dragged) e.preventDefault(); });
+
+  const paint = () => {
+    const q = search.value.trim().toLowerCase();
+    grid.classList.toggle('filtering', Boolean(q));  // no moving while only some notes are shown
+    const shown = list.filter((n) => !q || n.body.toLowerCase().includes(q));
+    if (!list.length) {
+      grid.replaceChildren(el('div', { class: 'empty notes-empty' }, el('strong', { text: 'No notes yet' }),
+        'Ideas, reminders, things to say in the next meeting: write them here instead of on paper sticky notes. Only you see them.'));
+    } else if (!shown.length) {
+      grid.replaceChildren(el('div', { class: 'empty notes-empty' }, el('strong', { text: 'No note matches' }), `Nothing contains “${search.value.trim()}”.`));
+    } else grid.replaceChildren(...shown.map(card));
+  };
+  search.addEventListener('input', () => { flushAll(); paint(); });
+
+  const add = async () => {
+    try {
+      const last = list.find((n) => !n.pinned);
+      const n = await api('/api/notes', { method: 'POST', body: JSON.stringify({ color: last ? last.color : 'yellow' }) });
+      search.value = '';
+      list.splice(list.filter((x) => x.pinned).length, 0, n);
+      paint();
+      saveOrder();
+      if (n.box) { n.box.querySelector('textarea').focus(); n.box.scrollIntoView({ block: 'nearest' }); }
+    } catch (e) { toast(e.message); }
+  };
+
+  const warn = (e) => { if (pending.size) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', warn);
+  state.cleanup = () => { window.removeEventListener('beforeunload', warn); flushAll(); };
+
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('Private: only you see them', 'Notes', search,
+      el('button', { type: 'button', class: 'btn btn-primary', onclick: add }, icon('plus', 16, 2), 'New note')),
+    grid));
+  paint();
+}
+
+/* ================= Archive: Year → Month → Week ================= */
+
+const weekRange = (w) => `${fmtShort(w.start)} – ${fmtShort(w.end)}`;
+
+async function renderArchive(weekStart) {
+  if (weekStart) { await renderArchiveWeek(weekStart); return; }
+  const years = await api('/api/archive');
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const weekRow = (w) => el('a', { class: 'meeting-row', href: `#/archive/${w.start}` },
+    el('div', { class: 'date-tile' }, el('b', { text: parseDate(w.start).getDate() }), el('span', { text: MONTHS[parseDate(w.start).getMonth()] })),
+    el('div', { class: 'grow' },
+      el('span', { class: 'name', text: `Week ${weekRange(w)}` }),
+      el('span', { class: 'small subtle', text: [
+        w.meetings ? plural(w.meetings, 'meeting') : null, w.standups ? plural(w.standups, 'standup') : null,
+        w.done ? `${w.done} finished` : null, w.report && isManager() ? 'weekly report saved' : null,
+      ].filter(Boolean).join(' · ') || 'Nothing recorded' })),
+    el('span', { class: 'row-arrow' }, icon('arrow', 16, 2)));
+  view.replaceChildren(el('div', { class: 'page' },
+    pageHead('Earlier weeks', 'Archive'),
+    el('p', { class: 'muted', text: 'Every Monday the week that ended moves here, so Meetings, Daily standups and Tasks start fresh. Nothing is deleted: open work stays in Tasks, past meetings open in full, and “Ask the archive” still searches everything.' }),
+    years.length ? null : el('div', { class: 'empty' }, el('strong', { text: 'The archive is empty' }), 'Weeks appear here once they are over.'),
+    ...years.map((y, yi) => el('section', { class: 'card stack' },
+      el('h2', { text: String(y.year) }),
+      y.months.map((m, mi) => el('details', { class: 'archive-month', open: yi === 0 && mi === 0 },
+        el('summary', {}, el('strong', { text: m.name }), el('span', { class: 'small subtle', text: ` · ${plural(m.weeks.length, 'week')}` })),
+        el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '8px' } }, m.weeks.map(weekRow))))))));
+}
+
+async function renderArchiveWeek(weekStart) {
+  const w = await api(`/api/archive/${encodeURIComponent(weekStart)}`);
+  const d = parseDate(w.start);
+  const card = (title, iconName, rows, render, empty) => el('section', { class: 'card', style: { gap: '4px' } },
+    el('div', { class: 'card-head' }, cardTitle(iconName, title), el('span', { class: 'mono small muted', text: rows.length })),
+    rows.length ? rows.map(render) : el('p', { class: 'small subtle', text: empty }));
+  const doneRow = (t) => el('div', { class: 'list-row' },
+    el('div', { class: 'grow' }, el('a', { href: t.meeting_source === 'manual' ? '#/tasks?tab=sent' : `#/meeting/${t.meeting_id}`, text: t.description })),
+    el('span', { class: 'small muted', text: t.assignee_name || 'unassigned' }),
+    el('span', { class: 'small mono muted', text: fmtShort(t.done_on) }),
+    t.jira_key ? el('span', { class: 'jira-badge', text: t.jira_key }) : null);
+  view.replaceChildren(el('div', { class: 'page' },
+    el('a', { class: 'small', href: '#/archive' }, '← Archive'),
+    pageHead(`${d.getFullYear()} · ${MONTHS_FULL[d.getMonth()]}`, `Week ${weekRange(w)}`),
+    el('div', { class: 'row' },
+      el('div', { class: 'col-3 stack' }, ...nn(
+        card('Meetings', 'mic', w.meetings, meetingRow, 'No meetings this week.'),
+        isManager() ? card('Daily standups', 'clock', w.standups, meetingRow, 'No standups this week.') : null)),
+      isManager() ? el('div', { class: 'col-2 stack' }, card('Finished this week', 'check', w.done, doneRow, 'Nothing was finished this week.')) : null),
+    isManager() ? (w.report
+      ? el('div', { class: 'stack' }, el('h2', { text: 'Weekly report (saved when the week ended)' }), ...reportBody(w.report, 'week'))
+      : el('p', { class: 'small subtle', text: 'No saved weekly report for this week.' })) : null));
+}

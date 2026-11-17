@@ -80,7 +80,14 @@ def client_ip(request: Request):
     return request.client.host if request.client else None
 
 
+FORWARDED = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip")
+
+
 def is_local(request: Request):
+    """Really this computer. A tunnel or proxy (e.g. VS Code port forwarding) runs on this computer
+    too, so what it relays looks local: it never counts as local when it carries forwarding headers."""
+    if any(h in request.headers for h in FORWARDED):
+        return False
     return _is_loopback(client_ip(request) or "")
 
 
@@ -98,12 +105,18 @@ def log(action, request: Request | None = None, user=None, target=None, detail=N
         print(f"audit log failed: {e}")
 
 
-def entries(limit=300, action=None):
+def entries(limit=300, action=None, user=None):
+    """user: only what this PM did (and the sign-ins with their email); None = everything."""
+    where, args = [], []
+    if action:
+        where.append("action LIKE ?")
+        args.append(f"{action}%")
+    if user is not None:
+        where.append("(actor_id = ? OR (actor_id IS NULL AND lower(actor_email) = lower(?)))")
+        args += [user["id"], user.get("email") or ""]
+    sql = "SELECT * FROM audit_log" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC LIMIT ?"
     with db.connect() as c:
-        if action:
-            return db.rows(c.execute("SELECT * FROM audit_log WHERE action LIKE ? ORDER BY id DESC LIMIT ?",
-                                     (f"{action}%", limit)))
-        return db.rows(c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)))
+        return db.rows(c.execute(sql, (*args, limit)))
 
 
 # ---------- HTTP protections ----------

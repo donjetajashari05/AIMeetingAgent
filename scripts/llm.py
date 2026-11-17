@@ -100,13 +100,17 @@ def groq_models():
         return []
 
 
-def _groq_chat(system, user, max_tokens, json_mode):
+def _groq_chat(system, user, max_tokens, json_mode, effort=None):
     body = {
         "model": groq_model(),
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": 0.2,
         "max_completion_tokens": max_tokens,
     }
+    if effort in ("low", "medium", "high") and "gpt-oss" in groq_model():
+        # gpt-oss "thinks" before answering; without this it used ~5000 thinking tokens for one short
+        # line (~1 minute on Groq's free tier, and most of the 8000 tokens/minute limit)
+        body["reasoning_effort"] = effort
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     choice = _groq("/chat/completions", body)["choices"][0]
@@ -162,7 +166,7 @@ def structured(system, user, schema: type[BaseModel], max_tokens=16000, effort="
         problem = None
         for _ in range(2):
             prompt = user if not problem else f"{user}\n\nYour previous reply was invalid ({problem}). Return valid JSON only."
-            raw = _groq_chat(sys_prompt, prompt, max_tokens, json_mode=True)
+            raw = _groq_chat(sys_prompt, prompt, max_tokens, json_mode=True, effort=effort)
             try:
                 return schema.model_validate_json(raw)
             except ValidationError as e:

@@ -7,6 +7,7 @@ are saved as "learned corrections" (wrong -> right). They are then used on every
   2. after transcription the same mistakes are replaced automatically
   3. the AI correction step gets them as examples of this team's usual mistakes
 A correction can be switched off or deleted on the "Vocabulary" page.
+Each PM has their own corrections (owner_id): one PM's fixes never change another PM's meetings.
 """
 import difflib
 import re
@@ -16,13 +17,14 @@ from . import db
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS corrections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER,              -- the PM who made the fix
     wrong TEXT NOT NULL,           -- lowercase, as the recognizer wrote it
     right TEXT NOT NULL,           -- as the PM wrote it
     times INTEGER NOT NULL DEFAULT 1,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (wrong, right)
+    UNIQUE (owner_id, wrong, right)
 );
 """
 
@@ -58,39 +60,42 @@ def word_fixes(old, new):
     return [(w, r) for w, r in fixes if w and r and len(w) <= 80 and len(r) <= 80]
 
 
-def learn(old, new):
+def learn(old, new, owner_id):
     """Save the fixes from one edited line. Returns them as [{"wrong", "right"}]."""
     fixes = [(w, r) for w, r in word_fixes(old, new) if w.lower() != r.lower()]  # a capital letter is not a mistake
     with db.connect() as c:
         for wrong, right in fixes:
-            c.execute("""INSERT INTO corrections (wrong, right, created_at, updated_at) VALUES (?,?,?,?)
-                         ON CONFLICT (wrong, right) DO UPDATE SET times = times + 1, updated_at = excluded.updated_at,
-                         active = 1""", (wrong.lower(), right, db.now(), db.now()))
+            c.execute("""INSERT INTO corrections (owner_id, wrong, right, created_at, updated_at) VALUES (?,?,?,?,?)
+                         ON CONFLICT (owner_id, wrong, right) DO UPDATE SET times = times + 1, updated_at = excluded.updated_at,
+                         active = 1""", (owner_id, wrong.lower(), right, db.now(), db.now()))
     return [{"wrong": w, "right": r} for w, r in fixes]
 
 
-def all_corrections():
+def all_corrections(owner_id):
     with db.connect() as c:
-        return db.rows(c.execute("SELECT * FROM corrections ORDER BY updated_at DESC, id DESC"))
+        return db.rows(c.execute("SELECT * FROM corrections WHERE owner_id IS ? ORDER BY updated_at DESC, id DESC",
+                                 (owner_id,)))
 
 
-def set_active(correction_id, active):
+def set_active(correction_id, active, owner_id):
     with db.connect() as c:
-        c.execute("UPDATE corrections SET active = ? WHERE id = ?", (1 if active else 0, correction_id))
+        c.execute("UPDATE corrections SET active = ? WHERE id = ? AND owner_id IS ?",
+                  (1 if active else 0, correction_id, owner_id))
 
 
-def delete(correction_id):
+def delete(correction_id, owner_id):
     with db.connect() as c:
-        c.execute("DELETE FROM corrections WHERE id = ?", (correction_id,))
+        c.execute("DELETE FROM corrections WHERE id = ? AND owner_id IS ?", (correction_id, owner_id))
 
 
-def rules():
+def rules(owner_id):
     """Active corrections to apply automatically: {wrong: right}.
     When one wrong word was fixed in different ways, the most frequent fix wins.
     Very short words (1-2 letters) are applied only once they were fixed at least twice."""
     out = {}
     with db.connect() as c:
-        for r in c.execute("SELECT wrong, right, times FROM corrections WHERE active = 1 ORDER BY times, updated_at"):
+        for r in c.execute("SELECT wrong, right, times FROM corrections WHERE active = 1 AND owner_id IS ? "
+                           "ORDER BY times, updated_at", (owner_id,)):
             if r["wrong"].lower() == r["right"].lower():
                 continue  # only the capital letter changed (e.g. "e" -> "E" at a sentence start)
             if len(r["wrong"]) >= 3 or r["times"] >= 2:
@@ -118,10 +123,10 @@ def apply_text(text, rule_map, pattern=None):
     return pattern.sub(sub, text)
 
 
-def apply_to_data(data):
-    """Apply the learned corrections to every transcript line. Changed lines keep the
+def apply_to_data(data, owner_id):
+    """Apply this PM's learned corrections to every transcript line. Changed lines keep the
     recognizer's text in "raw". Returns the number of changed lines."""
-    rule_map = rules()
+    rule_map = rules(owner_id)
     pattern = _pattern(rule_map)
     if not pattern:
         return 0
@@ -143,17 +148,17 @@ def count_matches(lines, fixes):
     return sum(1 for l in lines if pattern and pattern.search(l["text"])) if pattern else 0
 
 
-def hotword_terms(limit=40):
+def hotword_terms(owner_id, limit=40):
     """The right words, most-fixed first: they go to Whisper's hotwords."""
     with db.connect() as c:
         return [r[0] for r in c.execute(
-            "SELECT right FROM corrections WHERE active = 1 GROUP BY right ORDER BY SUM(times) DESC, MAX(updated_at) DESC "
-            "LIMIT ?", (limit,))]
+            "SELECT right FROM corrections WHERE active = 1 AND owner_id IS ? GROUP BY right "
+            "ORDER BY SUM(times) DESC, MAX(updated_at) DESC LIMIT ?", (owner_id, limit))]
 
 
-def examples(limit=60):
+def examples(owner_id, limit=60):
     """[(wrong, right)] for the AI correction prompt."""
     with db.connect() as c:
         return [(r[0], r[1]) for r in c.execute(
-            "SELECT wrong, right FROM corrections WHERE active = 1 AND lower(wrong) != lower(right) "
-            "ORDER BY times DESC, updated_at DESC LIMIT ?", (limit,))]
+            "SELECT wrong, right FROM corrections WHERE active = 1 AND owner_id IS ? AND lower(wrong) != lower(right) "
+            "ORDER BY times DESC, updated_at DESC LIMIT ?", (owner_id, limit))]

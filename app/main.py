@@ -1,5 +1,5 @@
 """
-AnchorzUp Meeting Agent — web app.
+SyncUp — web app.
 
 Run (from the project root, with the venv active):
     python -m app
@@ -10,20 +10,21 @@ import mimetypes
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
 from starlette.concurrency import run_in_threadpool
 from pathlib import Path
 
 import ctranslate2
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from . import assistant, auth, db, deadlines, dedupe, jira, learning, mailer, memory, notify, org, owners, pipeline, security, standup, voices, tickets as ticketing, weekly  # noqa: E402
+from . import archive, assistant, auth, db, deadlines, dedupe, gcal, jira, learning, mailer, memory, notes, notify, org, owners, pipeline, security, standup, voices, tickets as ticketing, weekly  # noqa: E402
 
 UPLOAD_DIR = db.ROOT / "data" / "uploads"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -49,17 +50,21 @@ async def lifespan(_app):
     voices.init()
     weekly.init()
     deadlines.init()
+    archive.init()
+    gcal.init()
+    notes.init()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     pipeline.start_worker()
     notify.start_scheduler()
     weekly.start_scheduler()
+    archive.start_scheduler()  # every Monday the week that ended moves to the Archive
     jira.start_sync()
     if not auth.admin_emails():
         print("WARNING: set ADMIN_EMAILS in .env so you can sign in as administrator.")
     yield
 
 
-app = FastAPI(title="AnchorzUp Meeting Agent", lifespan=lifespan)
+app = FastAPI(title="SyncUp", lifespan=lifespan)
 User = Depends(auth.current_user)
 app.middleware("http")(security.middleware)  # security headers, same-origin check, audit of blocked requests
 
@@ -73,6 +78,20 @@ async def no_stale_pages(request: Request, call_next):
     if path == "/" or path.endswith((".html", ".js", ".css")):
         response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+class _PageGZip(GZipMiddleware):
+    """Compress the app's own files (app.js ~216 KB -> ~50 KB): they load much faster through a
+    tunnel or a slow network. /api/ answers are never compressed: compressing pages that mix
+    secrets with what a visitor typed can leak the secrets (the BREACH attack)."""
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+        else:
+            await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_PageGZip, minimum_size=1024)
 
 
 # ---------- Login ----------
@@ -99,9 +118,9 @@ def auth_request(body: EmailIn, request: Request):
             raise HTTPException(503, "Email (SMTP) is not configured, so sign-in codes can't be sent. "
                                      "Ask the administrator to set SMTP in .env.")
         status = mailer.send(emp["email"], f"Your sign-in code: {code}",
-                             f"Hi {emp['full_name'].split()[0]},\n\nYour code for AnchorzUp Meeting Agent is: {code}\n\n"
+                             f"Hi {emp['full_name'].split()[0]},\n\nYour code for SyncUp is: {code}\n\n"
                              f"The code is valid for {auth.CODE_MINUTES} minutes. If you didn’t request it, ignore this email.",
-                             kind="login")
+                             kind="login", owner_id=emp["id"])
         if status == "dry-run":
             # Only with DEV_LOGIN_CODES=1, from this computer (checked above): testing without email
             return {"ok": True, "message": "Test mode (DEV_LOGIN_CODES=1): the code was filled in automatically.", "dev_code": code}
@@ -144,6 +163,7 @@ def auth_logout(request: Request, response: Response):
 def me(user=User):
     return {**{k: user[k] for k in ("id", "full_name", "email", "role", "is_admin", "is_pm",
                                     "pm_project_ids", "project_ids", "team_ids")},
+            "owns_workspace": True,  # every PM manages their own team, emails, vocabulary (scoped on the server)
             "login_disabled": auth.login_disabled(), "login_each_visit": auth.login_each_visit()}
 
 
@@ -160,10 +180,12 @@ def status(user=User):
         "jira": jira.configured(),
         "jira_mock": jira.mock(),
         "jira_default": jira._default_key() or None,  # used when a ticket/project has no Jira key
+        "calendar": gcal.configured(),         # Google Calendar can be connected (read only)
         "jira_url": os.environ.get("JIRA_BASE_URL", "").rstrip("/") if jira.configured() and not jira.mock() else None,
         "gpu": gpu,
         "models": MODELS,
-        "default_model": os.environ.get("WHISPER_MODEL") or "large-v3",  # most accurate for Albanian
+        # large-v3-turbo: measured on a real meeting here, ~3x faster than large-v3 on the CPU and just as accurate
+        "default_model": os.environ.get("WHISPER_MODEL") or "large-v3-turbo",
         "today": date.today().isoformat(),
     }
 
@@ -172,7 +194,9 @@ def status(user=User):
 
 @app.get("/api/meetings")
 def meetings(user=User):
-    return db.list_meetings(auth.visible_meeting_ids(user))
+    """This week's meetings; earlier weeks are on the Archive page."""
+    ws = archive.current_week_start()
+    return [m for m in db.list_meetings(auth.visible_meeting_ids(user)) if archive.is_current_meeting(m, ws)]
 
 
 @app.post("/api/meetings")
@@ -181,7 +205,7 @@ async def create_meeting(
     title: str = Form(""),
     meeting_date: str = Form(""),
     language: str = Form(""),
-    model: str = Form("large-v3"),
+    model: str = Form("large-v3-turbo"),
     source: str = Form("audio"),
     team_id: int | None = Form(None),
     project_id: int | None = Form(None),
@@ -189,12 +213,13 @@ async def create_meeting(
     speakers: int | None = Form(None),  # how many people spoke, if known
     user=User,
 ):
-    # Admins add any meeting; a PM only for the projects they manage
+    # A PM adds meetings to their own workspace: only their projects and teams can be chosen
+    auth.require_pm(user)
     if not user["is_admin"]:
-        if not user["is_pm"]:
-            raise HTTPException(403, "Only PMs and administrators can add meetings.")
-        if project_id not in user["pm_project_ids"]:
+        if project_id and project_id not in user["pm_project_ids"]:
             raise HTTPException(403, "Choose one of the projects you manage.")
+        if team_id and not project_id and team_id not in user["team_ids"]:
+            raise HTTPException(403, "Choose one of your teams.")
     ext = Path(file.filename or "").suffix.lower()
     if ext not in AUDIO_EXT | {".json"}:
         raise HTTPException(400, "Unknown format. Use mp3, wav, m4a, webm, ogg, mp4, flac or json.")
@@ -241,10 +266,9 @@ def meeting(meeting_id: int, user=User):
     m = db.meeting_detail(meeting_id)
     m["can_manage"] = auth.can_manage_meeting(user, m)
     m["earlier_work"] = memory.for_meeting(meeting_id)  # what this meeting said about earlier tasks
-    m["unowned"] = owners.for_meeting(meeting_id)  # discussed, but nobody was given it
     m["speakers"] = voices.speakers(meeting_id) if m["can_manage"] else []  # who each voice is (no fingerprints)
     if not auth.sees_tasks(user):  # tasks and tickets are for PMs; the others use Jira
-        m["tasks"], m["earlier_work"], m["unowned"] = [], [], []
+        m["tasks"], m["earlier_work"] = [], []
     return m
 
 
@@ -300,7 +324,7 @@ def edit_line(meeting_id: int, index: int, body: LineIn, user=User):
         raise HTTPException(404, "Line not found.")
     line = lines[index]
     old = line["text"]
-    learned = learning.learn(old, text) if text != old else []
+    learned = learning.learn(old, text, user["id"]) if text != old else []
     if text != old:
         line.setdefault("raw", old)
         line["text"] = text
@@ -324,7 +348,7 @@ def edit_quote(task_id: int, body: LineIn, user=User):
         raise HTTPException(400, "The quote can’t be empty.")
     if text == old:
         return {"quote": old, "learned": [], "lines": 0}
-    learned = learning.learn(old, text)
+    learned = learning.learn(old, text, user["id"])
     with db.connect() as c:
         c.execute("UPDATE tasks SET quote = ? WHERE id = ? OR (meeting_id = ? AND quote = ?)",
                   (text, task_id, t["meeting_id"], old))
@@ -352,7 +376,7 @@ def apply_learned(meeting_id: int, user=User):
     if not m["transcript"]:
         raise HTTPException(404, "This meeting has no transcript.")
     data = json.loads(m["transcript"])
-    changed = learning.apply_to_data(data)
+    changed = learning.apply_to_data(data, user["id"])
     if changed:
         db.save_transcript(meeting_id, data)
     return {"changed": changed}
@@ -360,8 +384,8 @@ def apply_learned(meeting_id: int, user=User):
 
 @app.get("/api/vocabulary")
 def vocabulary(user=User):
-    auth.require_admin(user)
-    return {"learned": learning.all_corrections(), "glossary": pipeline.vocab.load_glossary()}
+    auth.require_pm(user)
+    return {"learned": learning.all_corrections(user["id"]), "glossary": pipeline.vocab.load_glossary()}
 
 
 class CorrectionIn(BaseModel):
@@ -370,15 +394,15 @@ class CorrectionIn(BaseModel):
 
 @app.patch("/api/vocabulary/{correction_id}")
 def toggle_correction(correction_id: int, body: CorrectionIn, user=User):
-    auth.require_admin(user)
-    learning.set_active(correction_id, body.active)
+    auth.require_pm(user)
+    learning.set_active(correction_id, body.active, user["id"])
     return {"ok": True}
 
 
 @app.delete("/api/vocabulary/{correction_id}")
 def delete_correction(correction_id: int, user=User):
-    auth.require_admin(user)
-    learning.delete(correction_id)
+    auth.require_pm(user)
+    learning.delete(correction_id, user["id"])
     return {"ok": True}
 
 
@@ -412,7 +436,9 @@ def delete(meeting_id: int, request: Request, user=User):
 @app.get("/api/tasks")
 def tasks(status: str | None = None, assignee_id: int | None = None, user=User):
     jira.sync_status()  # tickets moved to Done in Jira become done here (at most once a minute)
-    return db.list_tasks(status if status in ("open", "done") else None, assignee_id, auth.task_scope(user))
+    ws = archive.current_week_start()  # work finished before this week is on the Archive page
+    return [t for t in db.list_tasks(status if status in ("open", "done") else None, assignee_id, auth.task_scope(user))
+            if archive.is_current_task(t, ws)]
 
 
 class TaskUpdate(BaseModel):
@@ -526,7 +552,7 @@ def update_task(task_id: int, body: TaskUpdate, user=User):
         if body.status not in ("open", "done"):
             raise HTTPException(400, "The status must be 'open' or 'done'.")
         if body.status == "open" and task["status"] == "done" and task["jira_key"]:
-            memory.reopen(task_id, "Reopened from AnchorzUp Meeting Agent.")  # moved out of Done in Jira too
+            memory.reopen(task_id, "Reopened from SyncUp.")  # moved out of Done in Jira too
         else:
             db.set_task_status(task_id, body.status)
     if body.set_assignee:
@@ -585,7 +611,8 @@ def _standup_scope(user):
 
 @app.get("/api/standups")
 def standups_list(user=User):
-    return standup.list_standups(_standup_scope(user))
+    ws = archive.current_week_start()  # earlier weeks are on the Archive page
+    return [m for m in standup.list_standups(_standup_scope(user)) if archive.is_current_meeting(m, ws)]
 
 
 @app.get("/api/standups/people")
@@ -600,70 +627,32 @@ def standup_detail(meeting_id: int, user=User):
     m = db.get_meeting(meeting_id)
     if not m or m.get("kind") != "standup" or (scope is not None and meeting_id not in scope):
         raise HTTPException(404, "Standup not found.")
+    try:  # how much of the recording Whisper could not understand (older transcripts: unknown)
+        m["unclear_share"] = json.loads(m["transcript"]).get("unclear_share") if m.get("transcript") else None
+    except ValueError:
+        m["unclear_share"] = None
     m.pop("transcript", None)
     m.pop("file_path", None)
     m["can_manage"] = auth.can_manage_meeting(user, m)
     m["updates"] = standup.updates(meeting_id)
+    # Every voice in the recording, so the PM can name (or correct) them from the report itself
+    m["speakers"] = voices.speakers(meeting_id) if m["can_manage"] and m["status"] not in BUSY else []
     return m
 
 
-# ---------- Needs an owner ----------
-
-class OwnerAssign(BaseModel):
-    employee_id: int
-    due_date: str | None = None
-
-
-class OwnerDismiss(BaseModel):
-    note: str | None = None
-
-
-def _owner_issue(issue_id, user):
-    """The issue, if this user manages its meeting."""
-    u = owners.get(issue_id)
-    allowed = _manager_meeting_ids(user)
-    if not u or (allowed is not None and u["meeting_id"] not in allowed):
-        raise HTTPException(404, "Item not found.")
-    return u
-
+# ---------- Tasks without an assignee (reminder) ----------
 
 @app.get("/api/owners")
 def owners_list(user=User):
-    """Work discussed in meetings that nobody was given: AI-found issues + tasks without an assignee."""
-    return owners.open_items(_manager_meeting_ids(user))
-
-
-@app.post("/api/owners/{issue_id}/assign")
-def owners_assign(issue_id: int, body: OwnerAssign, user=User):
-    _owner_issue(issue_id, user)
-    try:
-        task_id = owners.assign(issue_id, body.employee_id, _check_due(body.due_date or None), user["id"])
-    except owners.OwnersError as e:
-        raise HTTPException(409, str(e))
-    return db.get_task(task_id)
-
-
-@app.post("/api/owners/{issue_id}/dismiss")
-def owners_dismiss(issue_id: int, body: OwnerDismiss, user=User):
-    _owner_issue(issue_id, user)
-    try:
-        owners.dismiss(issue_id, user["id"], body.note)
-    except owners.OwnersError as e:
-        raise HTTPException(409, str(e))
-    return {"ok": True}
-
-
-@app.post("/api/owners/{issue_id}/restore")
-def owners_restore(issue_id: int, user=User):
-    _owner_issue(issue_id, user)
-    owners.restore(issue_id)
-    return {"ok": True}
+    """Open tasks nobody was given yet, for the reminders on the home page and in Tasks."""
+    return {"tasks": owners.unassigned(_manager_meeting_ids(user))}
 
 
 @app.get("/api/tickets")
 def tickets(user=User):
     jira.sync_status()  # statuses changed in Jira (at most once a minute)
-    return db.list_tickets(_manager_meeting_ids(user))
+    ws = archive.current_week_start()  # tickets finished before this week are on the Archive page
+    return [t for t in db.list_tickets(_manager_meeting_ids(user)) if archive.is_current_task(t, ws)]
 
 
 class FromTasks(BaseModel):
@@ -706,8 +695,8 @@ class ManualTicket(BaseModel):
 @app.post("/api/tickets/manual")
 def ticket_manual(body: ManualTicket, user=User):
     """A ticket the PM writes by hand, without a meeting. It waits in "To send" on the Tickets page."""
-    _manager_meeting_ids(user)  # PMs and admins only
-    if not user["is_admin"] and body.project_id not in user["pm_project_ids"]:
+    allowed = _manager_meeting_ids(user)  # PMs and admins only
+    if not user["is_admin"] and body.project_id is not None and body.project_id not in user["pm_project_ids"]:
         raise HTTPException(403, "Choose one of your projects.")
     title = " ".join(body.title.split())[:250]
     if not title:
@@ -721,7 +710,7 @@ def ticket_manual(body: ManualTicket, user=User):
         raise HTTPException(400, "The Jira project must look like PAY or HR2 (capital letters).")
     assignee_id, assignee, email = None, None, None
     if body.assignee_id:
-        emp = next((e for e in org.overview()["employees"] if e["id"] == body.assignee_id), None)
+        emp = org.get_employee(body.assignee_id)
         if not emp:
             raise HTTPException(404, "Employee not found.")
         assignee_id, assignee = emp["id"], emp["full_name"]
@@ -738,17 +727,19 @@ def ticket_manual(body: ManualTicket, user=User):
             assignee = email
     if not body.force:
         # Same work already open (a ticket or a task from a meeting)? Ask before making a copy.
+        # Only this PM's own work is compared (never another PM's workspace).
+        only = "" if allowed is None else f" AND m.id IN ({db._in(allowed)})"
         with db.connect() as c:
             open_work = db.rows(c.execute(
                 "SELECT t.id, t.description, t.is_ticket, t.jira_key, COALESCE(e.full_name, t.assignee) AS who "
                 "FROM tasks t JOIN meetings m ON m.id = t.meeting_id LEFT JOIN employees e ON e.id = t.assignee_id "
-                "WHERE t.status = 'open' AND t.merged_into IS NULL AND (? IS NULL OR m.project_id = ?) "
-                "ORDER BY t.is_ticket DESC, t.id DESC LIMIT 500", (body.project_id, body.project_id)))
+                f"WHERE t.status = 'open' AND t.merged_into IS NULL AND (? IS NULL OR m.project_id = ?){only} "
+                "ORDER BY t.is_ticket DESC, t.id DESC LIMIT 500", (body.project_id, body.project_id, *(allowed or ()))))
         match = dedupe.best_match(title, open_work, assignee)
         if match:
             return {"duplicate": match}
         # Finished before as a ticket? Offer to reopen it instead of making a second one.
-        done = dedupe.best_match(title, memory.closed_tickets(project_id=body.project_id), assignee)
+        done = dedupe.best_match(title, memory.closed_tickets(project_id=body.project_id, meeting_ids=allowed), assignee)
         if done:
             return {"reopen": done}
     details = (body.details or "").strip()[:4000] or None
@@ -775,7 +766,7 @@ def reopen_ticket(ticket_id: int, request: Request, user=User):
     t = db.get_task(ticket_id)
     if not t or (allowed is not None and t["meeting_id"] not in allowed):
         raise HTTPException(404, "Ticket not found.")
-    error = memory.reopen(ticket_id, "Reopened by AnchorzUp Meeting Agent: the same work is needed again.")
+    error = memory.reopen(ticket_id, "Reopened by SyncUp: the same work is needed again.")
     security.log("jira.reopen", request, user, target=t.get("jira_key") or ticket_id, detail=t["description"])
     return {"ticket": db.get_task(ticket_id), "jira_error": error}
 
@@ -865,26 +856,23 @@ def _org_call(fn, *args):
 
 @app.get("/api/org")
 def org_overview(user=User):
-    data = org.overview()
-    if user["is_admin"]:
-        voice = voices.summary()  # consent date and how many meetings the voice was learned from
-        for e in data["employees"]:
-            e.update(voice.get(e["id"], {"voice_consent_at": None, "voice_samples": 0}))
-        return data
-    # Others see only their own teams/projects and the people in them
-    projects = [p for p in data["projects"] if p["id"] in user["project_ids"] or p["id"] in user["pm_project_ids"]]
-    teams = [t for t in data["teams"] if t["id"] in user["team_ids"]]
-    people = {user["id"]} | {m for p in projects for m in p["member_ids"]}
-    return {"employees": [e for e in data["employees"] if e["id"] in people], "teams": teams, "projects": projects}
+    """Every employee (the list is shared by all PMs), with only this PM's teams and projects:
+    the memberships a person has in another PM's teams are not shown here."""
+    auth.require_pm(user)
+    data = org.overview(auth.owner_of(user), auth.task_scope(user)[0])
+    voice = voices.summary()  # consent date and how many meetings the voice was learned from (shared)
+    for e in data["employees"]:
+        e.update(voice.get(e["id"], {"voice_consent_at": None, "voice_samples": 0}))
+    return data
 
 
 @app.post("/api/employees")
 def add_employee(body: EmployeeIn, request: Request, user=User):
-    auth.require_admin(user)
+    auth.require_pm(user)
     data = body.model_dump()
     data.pop("is_admin")  # participants never get system access
     data.pop("voice_consent")
-    new_id = _org_call(org.save_employee, data)
+    new_id = _org_call(org.save_employee, data, None, auth.owner_of(user))
     security.log("employee.add", request, user, target=new_id, detail=f"{data['full_name']} <{data.get('email') or '-'}>")
     _voice_consent(new_id, body.voice_consent, request, user)
     return {"id": new_id}
@@ -892,11 +880,11 @@ def add_employee(body: EmployeeIn, request: Request, user=User):
 
 @app.put("/api/employees/{employee_id}")
 def edit_employee(employee_id: int, body: EmployeeIn, request: Request, user=User):
-    auth.require_admin(user)
+    auth.require_pm(user)
     data = body.model_dump()
-    data.pop("is_admin")  # roles are fixed: only the owner uses the system
+    data.pop("is_admin")  # roles are fixed: only the PMs in ADMIN_EMAILS use the system
     data.pop("voice_consent")
-    r = _org_call(org.save_employee, data, employee_id)
+    r = _org_call(org.save_employee, data, employee_id, auth.owner_of(user))
     security.log("employee.edit", request, user, target=employee_id,
                  detail=f"{data['full_name']} <{data.get('email') or '-'}>, active={data.get('active')}")
     _voice_consent(employee_id, body.voice_consent, request, user)
@@ -916,7 +904,7 @@ def _voice_consent(employee_id, consent, request, user):
 async def enroll_voice(employee_id: int, request: Request, file: UploadFile = File(...), user=User):
     """A short sample of the person speaking alone: their name is then put on their voice from
     the first meeting. Only the fingerprint is kept; the recording is deleted right away."""
-    auth.require_admin(user)
+    auth.require_pm(user)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in AUDIO_EXT:
         raise HTTPException(400, "Unknown format. Use mp3, wav, m4a, webm, ogg, mp4, flac or aac.")
@@ -949,7 +937,7 @@ async def enroll_voice(employee_id: int, request: Request, file: UploadFile = Fi
 @app.post("/api/voices/test")
 async def test_voice(request: Request, file: UploadFile = File(...), user=User):
     """Record someone for a few seconds: who does the system think it is? Nothing is stored."""
-    auth.require_admin(user)
+    auth.require_pm(user)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in AUDIO_EXT:
         raise HTTPException(400, "Unknown format. Use mp3, wav, m4a, webm, ogg, mp4, flac or aac.")
@@ -973,10 +961,43 @@ async def test_voice(request: Request, file: UploadFile = File(...), user=User):
     return {**r, "seconds": round(seconds)}
 
 
+class VoiceExportIn(BaseModel):
+    passphrase: str = Field(max_length=200)
+
+
+@app.post("/api/voices/export")
+def export_voices(body: VoiceExportIn, request: Request, user=User):
+    """The learned voices as a file encrypted with a passphrase, for another PM's laptop."""
+    auth.require_pm(user)
+    try:
+        text, n = voices.export_profiles(body.passphrase)
+    except voices.VoiceError as e:
+        raise HTTPException(400, str(e))
+    security.log("voice.export", request, user, detail=f"{n} voice profile(s) exported (encrypted file)")
+    return {"filename": f"syncup-voices-{date.today().isoformat()}.syncupvoices", "data": text, "count": n}
+
+
+@app.post("/api/voices/import")
+async def import_voices(request: Request, file: UploadFile = File(...), passphrase: str = Form(""), user=User):
+    """Add the voices from another PM's export file (people are matched by email)."""
+    auth.require_pm(user)
+    raw = await file.read(voices.MAX_EXPORT_BYTES + 1)
+    if len(raw) > voices.MAX_EXPORT_BYTES:
+        raise HTTPException(413, "The file is too large for a voices file.")
+    try:
+        r = await run_in_threadpool(voices.import_profiles, raw.decode("utf-8", "replace"), passphrase[:200], user["id"])
+    except voices.VoiceError as e:
+        security.log("voice.import_failed", request, user, detail=str(e))
+        raise HTTPException(400, str(e))
+    security.log("voice.import", request, user,
+                 detail=f"{r['imported']} imported, {r['created']} people added, {r['kept']} kept, {len(r['skipped'])} skipped")
+    return r
+
+
 @app.delete("/api/employees/{employee_id}/voice")
 def delete_voice(employee_id: int, request: Request, user=User):
     """Delete the person's voice profile (it is learned again only from new namings)."""
-    auth.require_admin(user)
+    auth.require_pm(user)
     if voices.delete_profile(employee_id):
         security.log("voice.profile_delete", request, user, target=employee_id)
     return {"ok": True}
@@ -1004,7 +1025,7 @@ def name_speaker(meeting_id: int, label: str, body: SpeakerIn, request: Request,
 
 @app.delete("/api/employees/{employee_id}")
 def remove_employee(employee_id: int, request: Request, user=User):
-    auth.require_admin(user)
+    auth.require_pm(user)
     if employee_id == user["id"]:
         raise HTTPException(400, "S’mund ta fshish veten.")
     org.delete_employee(employee_id)
@@ -1014,20 +1035,78 @@ def remove_employee(employee_id: int, request: Request, user=User):
 
 @app.post("/api/employees/import")
 def import_employees(body: CsvIn, request: Request, user=User):
-    auth.require_admin(user)
+    auth.require_pm(user)
     if len(body.csv) > 500_000:
         raise HTTPException(413, "The list is too large.")
-    r = org.import_csv(body.csv)
+    r = org.import_csv(body.csv, auth.owner_of(user))
     security.log("employee.import", request, user, detail=str(r)[:300])
     return r
+
+
+# ---------- Sticky notes (private to each PM/administrator) ----------
+# Registered before the /api/{kind}s team/project routes, which would also match /api/notes.
+
+def _notes_user(user):
+    if not (user["is_admin"] or user["is_pm"]):
+        raise HTTPException(403, "Notes are for PMs and administrators.")
+
+
+class NoteIn(BaseModel):
+    body: str | None = Field(default=None, max_length=notes.MAX_BODY)
+    color: str | None = Field(default=None, max_length=20)
+    pinned: bool | None = None
+
+
+@app.get("/api/notes")
+def notes_list(user=User):
+    _notes_user(user)
+    return notes.list_notes(user["id"])
+
+
+@app.post("/api/notes")
+def notes_create(body: NoteIn, user=User):
+    _notes_user(user)
+    try:
+        return notes.create(user["id"], body.body or "", body.color or "yellow")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class NotesOrderIn(BaseModel):
+    ids: list[int] = Field(max_length=notes.MAX_NOTES)
+
+
+@app.put("/api/notes/order")
+def notes_order(body: NotesOrderIn, user=User):
+    """Drag & drop: the note ids in the order they are shown (pinned ones first)."""
+    _notes_user(user)
+    notes.reorder(user["id"], body.ids)
+    return {"ok": True}
+
+
+@app.patch("/api/notes/{note_id}")
+def notes_update(note_id: int, body: NoteIn, user=User):
+    _notes_user(user)
+    n = notes.update(user["id"], note_id, body.body, body.color, body.pinned)
+    if not n:
+        raise HTTPException(404, "Note not found.")
+    return n
+
+
+@app.delete("/api/notes/{note_id}")
+def notes_delete(note_id: int, user=User):
+    _notes_user(user)
+    if not notes.delete(user["id"], note_id):
+        raise HTTPException(404, "Note not found.")
+    return {"ok": True}
 
 
 @app.post("/api/{kind}s")
 def add_group(kind: str, body: GroupIn, request: Request, user=User):
     if kind not in ("team", "project"):
         raise HTTPException(404)
-    auth.require_admin(user)
-    new_id = _org_call(org.save_group, kind, body.model_dump())
+    auth.require_pm(user)
+    new_id = _org_call(org.save_group, kind, body.model_dump(), None, auth.owner_of(user))
     security.log(f"{kind}.add", request, user, target=new_id, detail=f"{body.name}, PM={body.pm_id}, Jira={body.jira_key}")
     return {"id": new_id}
 
@@ -1036,8 +1115,8 @@ def add_group(kind: str, body: GroupIn, request: Request, user=User):
 def edit_group(kind: str, group_id: int, body: GroupIn, request: Request, user=User):
     if kind not in ("team", "project"):
         raise HTTPException(404)
-    auth.require_admin(user)
-    r = _org_call(org.save_group, kind, body.model_dump(), group_id)
+    auth.require_pm(user)
+    r = _org_call(org.save_group, kind, body.model_dump(), group_id, auth.owner_of(user))
     security.log(f"{kind}.edit", request, user, target=group_id, detail=f"{body.name}, PM={body.pm_id}, Jira={body.jira_key}")
     return {"id": r}
 
@@ -1046,8 +1125,9 @@ def edit_group(kind: str, group_id: int, body: GroupIn, request: Request, user=U
 def remove_group(kind: str, group_id: int, request: Request, user=User):
     if kind not in ("team", "project"):
         raise HTTPException(404)
-    auth.require_admin(user)
-    org.delete_group(kind, group_id)
+    auth.require_pm(user)
+    if not org.delete_group(kind, group_id, auth.owner_of(user)):
+        raise HTTPException(404, "Not found.")
     security.log(f"{kind}.delete", request, user, target=group_id)
     return {"ok": True}
 
@@ -1056,26 +1136,188 @@ def remove_group(kind: str, group_id: int, request: Request, user=User):
 
 @app.get("/api/audit")
 def audit_log(action: str | None = None, user=User):
-    """Who did what (sign-ins, Jira, deletions, people and permissions). Admins only."""
-    auth.require_admin(user)
-    return security.entries(action=action)
+    """Who did what (sign-ins, Jira, deletions, people and permissions): each PM sees their own."""
+    auth.require_pm(user)
+    return security.entries(action=action, user=None if user["is_admin"] else user)
 
 
 @app.get("/api/outbox")
 def outbox(user=User):
-    auth.require_admin(user)
-    return mailer.outbox()
+    auth.require_pm(user)
+    return mailer.outbox(auth.owner_of(user))
 
 
 @app.post("/api/reminders/run")
 def run_reminders(user=User):
     """Send today's reminders now (they are sent only once per PM per day)."""
-    auth.require_admin(user)
+    auth.require_pm(user)
     people, pms = deadlines.run()
     return {"sent": notify.send_daily_reminders() + people + pms}
 
 
 # ---------- Weekly report ----------
+
+# ---------- Google Calendar (read only) ----------
+
+def _calendar_user(user):
+    if not (user["is_admin"] or user["is_pm"]):
+        raise HTTPException(403, "Only PMs and administrators add meetings, so only they connect a calendar.")
+
+
+@app.get("/api/calendar")
+def calendar_status(user=User):
+    return {"configured": gcal.configured(), "account": gcal.account(user["id"])}
+
+
+@app.post("/api/calendar/connect")
+def calendar_connect(request: Request, user=User):
+    _calendar_user(user)
+    try:
+        url = gcal.start(user["id"])
+    except gcal.CalendarError as e:
+        raise HTTPException(400, str(e))
+    security.log("calendar.connect_started", request, user=user)
+    return {"url": url}
+
+
+@app.get("/api/calendar/callback", include_in_schema=False)
+def calendar_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+    """Google sends the PM back here. The one-time state says who started it; the signed-in
+    session must be the same person (so nobody can attach their calendar to someone else)."""
+    try:
+        who = auth.current_user(request)
+    except HTTPException:
+        who = None
+    if error or not code:
+        security.log("calendar.connect_denied", request, user=who, detail=error or "no code")
+        return RedirectResponse("/#/?calendar=denied", status_code=303)
+    try:
+        if not who:
+            raise gcal.CalendarError("not signed in")
+        email = gcal.finish(state, code, who["id"])
+    except gcal.CalendarError as e:
+        security.log("calendar.connect_failed", request, user=who, detail=str(e))
+        return RedirectResponse("/#/?calendar=failed", status_code=303)
+    security.log("calendar.connected", request, user=who, detail=email)
+    return RedirectResponse("/#/?calendar=connected", status_code=303)
+
+
+@app.delete("/api/calendar")
+def calendar_disconnect(request: Request, user=User):
+    if gcal.disconnect(user["id"]):
+        security.log("calendar.disconnected", request, user=user)
+    return {"ok": True}
+
+
+class OnlineMeetingIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    start: str                      # local time, YYYY-MM-DDTHH:MM
+    minutes: int = Field(ge=5, le=480)
+    guests: list[str] = Field(default_factory=list, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    project_id: int | None = None
+
+
+@app.get("/api/calendar/meetings")
+def calendar_online_meetings(user=User):
+    _calendar_user(user)
+    return gcal.online_meetings(user)
+
+
+@app.delete("/api/calendar/meetings/{online_id}")
+def calendar_cancel_meeting(online_id: int, request: Request, user=User):
+    _calendar_user(user)
+    m = gcal.get_online(online_id)
+    if not m or not (user["is_admin"] or m["created_by"] == user["id"]):
+        raise HTTPException(404, "Meeting not found.")
+    if m["created_by"] != user["id"]:
+        raise HTTPException(403, "Only the person who created it can cancel it (it is in their Google Calendar).")
+    try:
+        gcal.cancel_online(user["id"], online_id)
+    except gcal.CalendarError as e:
+        raise HTTPException(400 if not isinstance(e, gcal.GoogleHTTPError) else 502, str(e))
+    security.log("calendar.meeting_cancelled", request, user=user, target=m["google_event_id"], detail=m["title"])
+    return {"ok": True}
+
+
+@app.post("/api/calendar/meetings")
+def calendar_create_meeting(body: OnlineMeetingIn, request: Request, user=User):
+    """New online meeting: a Google Calendar event with a Google Meet link; Google emails the
+    invitation to the guests and adds it to their calendars."""
+    _calendar_user(user)
+    if body.project_id is not None and not user["is_admin"] and body.project_id not in user["pm_project_ids"]:
+        body.project_id = None  # only link to projects the PM manages
+    if body.project_id is not None:
+        with db.connect() as c:
+            if not c.execute("SELECT 1 FROM projects WHERE id = ?", (body.project_id,)).fetchone():
+                body.project_id = None
+    try:
+        start = datetime.fromisoformat(body.start).astimezone()  # no time zone given = this computer's
+    except ValueError:
+        raise HTTPException(400, "Choose a valid date and time.")
+    now = datetime.now().astimezone()
+    if start < now - timedelta(hours=1) or start > now + timedelta(days=366):
+        raise HTTPException(400, "Choose a time from now until one year ahead.")
+    try:
+        guests = gcal.clean_guests(body.guests)
+        title = " ".join(body.title.split())
+        out = gcal.create_meeting(user["id"], title, start, body.minutes, guests,
+                                  (body.description or "").strip() or None)
+    except gcal.CalendarError as e:
+        security.log("calendar.meeting_failed", request, user=user, detail=str(e))
+        raise HTTPException(400 if not isinstance(e, gcal.GoogleHTTPError) else 502, str(e))
+    out["online_id"] = gcal.save_online(user["id"], body.project_id, out, guests, (body.description or "").strip() or None)
+    allowed = {d.strip().lower().lstrip("@") for d in (os.environ.get("ALLOWED_EMAIL_DOMAINS") or "").split(",") if d.strip()}
+    outside = [g for g in guests if allowed and g.rsplit("@", 1)[-1] not in allowed]
+    security.log("calendar.meeting_created", request, user=user, target=out.get("id"),
+                 detail=f"{title} · {start.isoformat(timespec='minutes')} · {len(guests)} invited"
+                        + (f" · outside the company: {', '.join(outside)}" if outside else ""))
+    return out
+
+
+@app.get("/api/calendar/events")
+def calendar_events(day: str | None = None, user=User):
+    _calendar_user(user)
+    try:
+        d = date.fromisoformat(day) if day else date.today()
+    except ValueError:
+        raise HTTPException(400, "The date must be in YYYY-MM-DD format.")
+    try:
+        return gcal.events(user["id"], d, None if user["is_admin"] else set(user["pm_project_ids"]))
+    except gcal.CalendarError as e:
+        raise HTTPException(502, str(e))
+
+
+# ---------- Archive (Year -> Month -> Week) ----------
+
+def _archive_scope(user):
+    """(meetings the user may see, meetings whose finished work they see, which saved report)."""
+    meetings = auth.visible_meeting_ids(user)
+    if user["is_admin"]:
+        return meetings, None, "all"
+    if user["is_pm"]:
+        return meetings, auth.task_scope(user)[0], f"pm:{user['id']}"
+    return meetings, [], None  # others: their meetings only, no tasks or reports
+
+
+@app.get("/api/archive")
+def archive_tree(user=User):
+    meetings, tasks_of, scope = _archive_scope(user)
+    return archive.tree(meetings, tasks_of, report_scope=scope)
+
+
+@app.get("/api/archive/{week_start}")
+def archive_week(week_start: str, user=User):
+    try:
+        ws = archive.week_start_of(date.fromisoformat(week_start).isoformat())
+    except ValueError:
+        raise HTTPException(400, "The week must be a date like 2026-11-09.")
+    meetings, tasks_of, scope = _archive_scope(user)
+    r = archive.week(ws, meetings, tasks_of, scope)
+    if r is None:
+        raise HTTPException(404, "This week is not in the archive yet.")
+    return r
+
 
 def _weekly_scope(user, project_id=None):
     """Projects in this user's weekly report: admin = all (or one), PM = theirs."""
@@ -1124,9 +1366,10 @@ def weekly_send_me(body: WeeklySend, user=User):
 
 @app.post("/api/weekly/run")
 def weekly_run(period: str = "week", user=User):
-    """Send this week's report (or last month's) to every PM now (admin)."""
-    auth.require_admin(user)
-    return {"sent": weekly.send_all(force=True, period="month" if period == "month" else "week")}
+    """Send this week's report (or last month's) now: to me (a PM), or to every PM (local admin)."""
+    auth.require_pm(user)
+    return {"sent": weekly.send_all(force=True, period="month" if period == "month" else "week",
+                                    only_pm=auth.owner_of(user))}
 
 
 # ---------- Ask the archive ----------
@@ -1143,10 +1386,39 @@ def ask(body: Question, user=User):
         raise HTTPException(400, "Type a question.")
     try:
         history = [{"q": str(h.get("q", ""))[:1000], "a": str(h.get("a", ""))[:2000]} for h in body.history[-4:]]
-        return assistant.ask(q[:1000], pipeline.has_claude_key(), auth.visible_meeting_ids(user), user["id"], history,
-                             tasks=auth.sees_tasks(user))
+        # Only this PM's meetings and project names (no "assigned to me" tasks from another PM's workspace)
+        return assistant.ask(q[:1000], pipeline.has_claude_key(), auth.visible_meeting_ids(user),
+                             user["id"] if user["is_admin"] else None, history, tasks=auth.sees_tasks(user),
+                             project_ids=None if user["is_admin"] else user["pm_project_ids"])
     except assistant.llm.LLMError as e:
         raise HTTPException(502, str(e))
+
+
+@app.post("/api/ask/voice")
+async def ask_voice(file: UploadFile = File(...), user=User):
+    """A spoken question: returns the text, the page then asks it like a typed one.
+    Transcribed on this computer; the recording is deleted right away."""
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in AUDIO_EXT:
+        raise HTTPException(400, "Unknown audio format.")
+    dest = UPLOAD_DIR / f"question-{uuid.uuid4().hex}{ext}"
+    try:
+        size = 0
+        with open(dest, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 10 * 1024 * 1024:
+                    raise HTTPException(413, "Too long: ask in under a minute.")
+                out.write(chunk)
+        try:
+            text, seconds = await run_in_threadpool(pipeline.transcribe_question, dest, auth.owner_of(user))
+        except Exception as e:  # noqa: BLE001  (a broken recording must not crash the server)
+            raise HTTPException(400, f"Could not understand the recording: {str(e).splitlines()[0][:200]}")
+    finally:
+        dest.unlink(missing_ok=True)  # the recording is never kept
+    if seconds > 90:
+        raise HTTPException(413, "Too long: ask in under a minute.")
+    return {"text": text[:1000]}
 
 
 @app.get("/", include_in_schema=False)

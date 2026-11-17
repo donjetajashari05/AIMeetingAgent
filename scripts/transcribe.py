@@ -11,6 +11,7 @@ Examples:
 """
 import argparse
 import json
+import os
 import sys
 import time
 from functools import lru_cache
@@ -23,6 +24,8 @@ from faster_whisper import WhisperModel
 load_dotenv()
 
 SPEAKER_LABEL = "Folësi"
+UNCLEAR_LOGPROB = -1.0  # Whisper's own threshold for "not sure, try again"
+UNCLEAR_REPEAT = 2.4    # text this repetitive ("dhe dhe dhe…") is a loop, not speech
 
 
 def get_device():
@@ -36,10 +39,14 @@ def get_device():
 def load_model(name):
     """Load a Whisper model once and reuse it (loading takes several seconds)."""
     device, compute_type = get_device()
-    return WhisperModel(name, device=device, compute_type=compute_type)
+    # On laptop CPUs with fast and slow cores (Intel 12th gen and later), more threads is SLOWER:
+    # the fast cores wait for the slow ones. Measured on an i7-1355U: 4 threads ~2x faster than 10.
+    # WHISPER_THREADS in .env overrides it (e.g. a desktop CPU with many fast cores).
+    threads = int(os.environ.get("WHISPER_THREADS") or min(4, os.cpu_count() or 4)) if device == "cpu" else 0
+    return WhisperModel(name, device=device, compute_type=compute_type, cpu_threads=threads)
 
 
-def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
+def transcribe_audio(audio, model_name="large-v3-turbo", language=None, diarize=False,
                      num_speakers=None, min_speakers=None, max_speakers=None,
                      on_segment=None, on_info=None, on_diarize=None, diarize_required=True,
                      initial_prompt=None, hotwords=None):
@@ -67,6 +74,14 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
         # cutting and some padding keep word endings (e.g. "-ni", "-im") from being chopped.
         vad_parameters={"min_silence_duration_ms": 700, "speech_pad_ms": 400},
         beam_size=5,
+        # Each 30-second window starts fresh instead of from the previous window's text: one garbled
+        # window then can't drag the rest into loops ("dhe dhe dhe…"). Measured on a real standup it
+        # was clearer and faster. The vocabulary prompt helps the first window, as before (it was
+        # pushed out by the carried text after that anyway); later fixes come from the learned
+        # corrections and the AI correction step.
+        condition_on_previous_text=False,
+        repetition_penalty=1.1,
+        no_repeat_ngram_size=3,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
         word_timestamps=diarize,  # word-level times are needed to match speakers
@@ -75,9 +90,15 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
         on_info(info)
 
     results, words = [], []
+    speech, unclear = 0.0, 0.0
     for seg in segments:  # transcription actually happens while iterating
         item = {"start": round(seg.start, 2), "end": round(seg.end, 2), "text": seg.text.strip()}
         results.append(item)
+        # Whisper's own signs that it was guessing: low confidence, or the same words over and over
+        length = max(seg.end - seg.start, 0.0)
+        speech += length
+        if seg.avg_logprob < UNCLEAR_LOGPROB or seg.compression_ratio > UNCLEAR_REPEAT:
+            unclear += length
         for w in seg.words or []:
             words.append({"start": w.start, "end": w.end, "word": w.word})
         if on_segment:
@@ -111,6 +132,9 @@ def transcribe_audio(audio, model_name="large-v3", language=None, diarize=False,
         "duration_sec": round(info.duration, 1),
         "processing_sec": round(time.time() - start, 1),
         "asr_sec": round(asr_elapsed, 1),
+        # Share of the speech Whisper could not make out (0-1): a high value means the recording
+        # itself was the problem (distance, noise, people talking at once), not the report
+        "unclear_share": round(unclear / speech, 2) if speech else None,
         "segments": results,
     }
     if utterances is not None:

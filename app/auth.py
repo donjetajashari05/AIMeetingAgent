@@ -1,8 +1,10 @@
 """
 Login with a one-time code sent to the work email, sessions, and who may see what.
 
-Single-user system: only the owner (ADMIN_EMAILS in .env, or an employee marked admin) can log in.
-The owner is the PM and can do everything. Other employees are only meeting participants.
+Only the PMs can log in (ADMIN_EMAILS in .env, or an employee marked admin). Each PM has their
+own workspace: they see and change only their own teams, projects, meetings, tasks, tickets,
+reports, emails and learned words. The employee list and the voice profiles are shared by all.
+Other employees are only meeting participants.
 """
 import hashlib
 import hmac
@@ -160,19 +162,19 @@ def user_from_token(token):
         """, (_hash(token), db.now())).fetchone()
         if not r or not is_owner(r):
             return None
-        user = _build_user(c, dict(r))
-    user["role"] = "pm"
-    return user
+        return _build_user(c, dict(r))
 
 
 def _build_user(c, user):
+    """A signed-in PM. is_admin stays False: nobody sees another PM's workspace. Their own
+    projects and teams are the ones they own (not ones they were only added to as a member)."""
     uid = user["id"]
-    user["is_admin"] = bool(user["is_admin"]) or (user["email"] or "").lower() in admin_emails()
+    user["is_admin"] = False
     user["pm_project_ids"] = [x[0] for x in c.execute("SELECT id FROM projects WHERE pm_id = ?", (uid,))]
-    user["project_ids"] = [x[0] for x in c.execute("SELECT project_id FROM project_members WHERE employee_id = ?", (uid,))]
-    user["team_ids"] = [x[0] for x in c.execute("SELECT team_id FROM team_members WHERE employee_id = ?", (uid,))]
-    user["is_pm"] = bool(user["pm_project_ids"])
-    user["role"] = "admin" if user["is_admin"] else "pm" if user["is_pm"] else "employee"
+    user["project_ids"] = list(user["pm_project_ids"])
+    user["team_ids"] = [x[0] for x in c.execute("SELECT id FROM teams WHERE owner_id = ?", (uid,))]
+    user["is_pm"] = True
+    user["role"] = "pm"
     return user
 
 
@@ -217,6 +219,17 @@ def require_admin(user):
         raise HTTPException(403, "Only an administrator can do this.")
 
 
+def require_pm(user):
+    """Any signed-in PM (they act in their own workspace)."""
+    if not (user["is_admin"] or user["is_pm"]):
+        raise HTTPException(403, "Only PMs can do this.")
+
+
+def owner_of(user):
+    """Whose workspace this user works in: None = every workspace (local single-user mode)."""
+    return None if user["is_admin"] else user["id"]
+
+
 def visible_meeting_ids(user):
     """None = all meetings (admin). Otherwise the ids this user may open."""
     if user["is_admin"]:
@@ -256,21 +269,15 @@ def sees_tasks(user):
 
 def task_scope(user):
     """(meeting_ids, assignee_id) filter for task lists. Admin: all.
-    PM: every task of their projects' meetings + own. Everyone else: none (they use Jira)."""
+    PM: the tasks of the meetings in their workspace only. A task in another PM's meeting stays
+    there even when this PM is its assignee (0 = matches no assignee; ids start at 1)."""
     if user["is_admin"]:
         return None, None
     if not sees_tasks(user):
-        return set(), 0  # matches nothing (ids start at 1)
-    if user["is_pm"]:
-        with db.connect() as c:
-            ids = {r[0] for r in c.execute(
-                f"SELECT id FROM meetings WHERE project_id IN ({','.join('?' * len(user['pm_project_ids']))})",
-                user["pm_project_ids"])}
-        return ids, user["id"]  # tasks in those meetings OR assigned to me
+        return set(), 0  # matches nothing
+    return visible_meeting_ids(user), 0
 
 
 def can_edit_task(user, task, reassign=False):
     m = db.get_meeting(task["meeting_id"])
-    if user["is_admin"] or (m and can_manage_meeting(user, m)):
-        return True
-    return sees_tasks(user) and not reassign and task.get("assignee_id") == user["id"]
+    return bool(user["is_admin"] or (m and can_manage_meeting(user, m)))

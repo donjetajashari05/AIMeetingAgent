@@ -192,7 +192,7 @@ def push_tasks(task_ids, sender_id=None):
                 None if manual else f"From the meeting “{t['meeting_title']}” ({t['meeting_date']}).",
                 f"Quote: “{t['quote']}”" if t["quote"] else None,
                 f"Deadline as said: {t['due_date_text']}" if t["due_date_text"] else None,
-                "Written by the PM in AnchorzUp Meeting Agent." if manual else f"Created by AnchorzUp Meeting Agent: {link}",
+                "Written by the PM in SyncUp." if manual else f"Created by SyncUp: {link}",
             ]),
             "labels": ["meeting-agent"],
         }
@@ -230,7 +230,7 @@ def push_tasks(task_ids, sender_id=None):
                 _plan_line(t),
                 None if manual else f"From the meeting “{t['meeting_title']}” ({t['meeting_date']}).",
             ] if x),
-            kind="ticket", link=url, link_text="Open the ticket")
+            kind="ticket", link=url, link_text="Open the ticket", owner_id=sender_id)
     return {"created": created, "errors": errors}
 
 
@@ -268,7 +268,7 @@ def push_meeting(meeting_id, task_ids=None):
                 _plan_line(t),
                 f"Quote: “{t['quote']}”" if t["quote"] else None,
                 f"Deadline as said: {t['due_date_text']}" if t["due_date_text"] else None,
-                f"Created by AnchorzUp Meeting Agent: {link}",
+                f"Created by SyncUp: {link}",
             ]),
             "labels": ["meeting-agent"],
         }

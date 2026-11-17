@@ -13,6 +13,7 @@ gets one email about their projects for the week (Monday to Sunday):
   - open work per person
 The same report is on the page "Weekly report" (any week), with "Email it to me".
 """
+import hashlib
 import json
 import os
 import sys
@@ -173,7 +174,23 @@ def _highlights(r):
         "blocked": short(r["blocked"], "description", "who", "note"),
         "open_per_person": r["workload"][:15],
     }
-    return llm.text(HIGHLIGHTS_PROMPT, json.dumps(data, ensure_ascii=False), max_tokens=1200).strip()
+    text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    # The page asks for the report on every visit, and the AI took ~1.5 s each time: the same data
+    # gets the same highlights from memory; any change in the data writes them again.
+    key = hashlib.sha256(text.encode()).hexdigest()
+    with _hl_lock:
+        if key in _hl_cache:
+            return _hl_cache[key]
+    out = llm.text(HIGHLIGHTS_PROMPT, text, max_tokens=1200).strip()
+    with _hl_lock:
+        if len(_hl_cache) >= 200:
+            _hl_cache.pop(next(iter(_hl_cache)))  # oldest first
+        _hl_cache[key] = out
+    return out
+
+
+_hl_cache = {}  # sha256 of the report data -> highlights (memory only)
+_hl_lock = threading.Lock()
 
 
 # ---------- Email ----------
@@ -236,7 +253,7 @@ def send(pm, project_ids, day=None, period="week"):
     return mailer.send(pm["email"], subject, email_text(r, pm["full_name"].split()[0]),
                        kind="monthly" if r["period"] == "month" else "weekly",
                        link=f"{mailer.app_url()}/#/weekly?period={r['period']}&week={r['week_start']}",
-                       link_text=f"Open the {name.lower()} report")
+                       link_text=f"Open the {name.lower()} report", owner_id=pm["id"])
 
 
 def pms():
@@ -251,7 +268,7 @@ def pms():
     return list(out.values())
 
 
-def send_all(today=None, force=False, period="week"):
+def send_all(today=None, force=False, period="week", only_pm=None):
     """Report to every PM, once per PM per period unless force. Returns how many were sent.
     Weekly: the current week. Monthly: the month that just ended (sent at the start of the next)."""
     today = today or date.today()
@@ -259,6 +276,8 @@ def send_all(today=None, force=False, period="week"):
     key = week_of(day)[0].isoformat() if period == "week" else "M" + month_of(day)[0].isoformat()[:7]
     n = 0
     for pm in pms():
+        if only_pm is not None and pm["id"] != only_pm:
+            continue
         with db.connect() as c:
             if not force and c.execute("SELECT 1 FROM weekly_log WHERE pm_id = ? AND week_start = ?",
                                        (pm["id"], key)).fetchone():

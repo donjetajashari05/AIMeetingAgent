@@ -2,6 +2,7 @@
 Background processing: transcription -> (speakers) -> extraction with Claude.
 Jobs run one at a time in a worker thread so the CPU isn't overloaded.
 """
+import functools
 import json
 import os
 import queue
@@ -12,7 +13,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from . import db, dedupe, learning, memory, notify, org, owners, standup, voices
+from . import db, dedupe, learning, memory, org, owners, standup, voices
 
 sys.path.insert(0, str(db.ROOT / "scripts"))
 
@@ -41,7 +42,24 @@ def start_worker():
     threading.Thread(target=_worker, daemon=True, name="pipeline").start()
 
 
+def _preload():
+    """Load Whisper and the speaker model before the first meeting arrives (~50 s on a laptop CPU),
+    so no meeting waits for it. In the worker thread itself: a meeting queued meanwhile simply
+    starts right after, and the models are never loaded twice."""
+    t = time.time()
+    try:
+        import transcribe as transcriber  # scripts/transcribe.py
+        transcriber.load_model(os.environ.get("WHISPER_MODEL") or "large-v3-turbo")
+        if has_hf_token():
+            import diarize
+            diarize.preload()
+        print(f"Models ready in {time.time() - t:.0f} s.")
+    except (Exception, SystemExit):
+        traceback.print_exc()  # the meeting itself will report the problem
+
+
 def _worker():
+    _preload()
     while True:
         job, meeting_id = _jobs.get()
         try:
@@ -74,18 +92,47 @@ def _process(meeting_id):
 def _context(m):
     """Vocabulary (data/fjalori.txt), the meeting's people and the project names."""
     people = [p["full_name"] for p in org.participants(m["team_id"], m["project_id"])][:25]
-    with db.connect() as c:
-        projects = [r[0] for r in c.execute("SELECT name FROM projects ORDER BY id")][:15]
+    with db.connect() as c:  # only the names of this PM's own projects
+        projects = [r[0] for r in c.execute("SELECT name FROM projects WHERE pm_id IS ? ORDER BY id",
+                                            (m.get("created_by"),))][:15]
     glossary = vocab.load_glossary()
     # Words learned from the PM's transcript fixes come first, so they fit in Whisper's hotwords
     known = {g["term"].lower() for g in glossary}
-    learned = [{"term": w, "meaning": None} for w in learning.hotword_terms() if w.lower() not in known]
+    learned = [{"term": w, "meaning": None} for w in learning.hotword_terms(m.get("created_by")) if w.lower() not in known]
     return learned + glossary, people, projects
 
 
 def vocabulary_prompt(m):
     """Hint for Whisper: the team's names, project names and the words in data/fjalori.txt."""
     return vocab.whisper_prompt(*_context(m))
+
+
+def transcribe_question(path, owner_id=None):
+    """A spoken question for "Ask the archive": a few seconds of audio -> text. Whisper runs
+    here on this computer, so the recording never leaves it (only the text is asked, as when typed)."""
+    with db.connect() as c:
+        people = [r[0] for r in c.execute("SELECT full_name FROM employees WHERE active = 1 ORDER BY id")][:40]
+        projects = [r[0] for r in (c.execute("SELECT name FROM projects ORDER BY id") if owner_id is None else
+                                    c.execute("SELECT name FROM projects WHERE pm_id = ? ORDER BY id", (owner_id,)))][:15]
+    prompt = "Pyetje për mbledhjet, detyrat dhe vendimet e ekipit, në shqip ose anglisht."
+    if people or projects:
+        prompt += " " + ", ".join([*people, *projects]) + "."
+    # Speed matters here (someone is waiting): the faster turbo model, one beam, and the language
+    # given (detecting it costs a second pass). With "sq", English questions still come out in English.
+    segments, info = _question_model().transcribe(
+        str(path), language=os.environ.get("ASK_VOICE_LANGUAGE") or "sq", beam_size=1, vad_filter=True,
+        initial_prompt=prompt[:600], condition_on_previous_text=False)
+    text = " ".join(s.text.strip() for s in segments).strip()
+    return text, info.duration
+
+
+@functools.lru_cache(maxsize=1)
+def _question_model():
+    import transcribe as transcriber  # scripts/transcribe.py (loads faster-whisper)
+    from faster_whisper import WhisperModel
+    device, compute_type = transcriber.get_device()
+    return WhisperModel(os.environ.get("ASK_VOICE_MODEL") or "large-v3-turbo", device=device, compute_type=compute_type,
+                        cpu_threads=os.cpu_count() or 4)
 
 
 def _transcribe(meeting_id, m):
@@ -107,15 +154,20 @@ def _transcribe(meeting_id, m):
         db.update_meeting(meeting_id, status="diarizing", progress=1, note="Identifying speakers…")
 
     glossary, people, projects = _context(m)
+    # Hotwords are off by default: measured on a real meeting they made Whisper 2.4x slower on the
+    # CPU and worse (random capitals, made-up words). The vocabulary still helps through the
+    # prompt, the learned fixes after transcription and the AI correction step.
+    # WHISPER_HOTWORDS=1 in .env turns them back on.
+    use_hotwords = os.environ.get("WHISPER_HOTWORDS", "0") == "1"
     data = transcriber.transcribe_audio(
         m["file_path"], model_name=m["model"], language=m["language_hint"] or None,
         diarize=has_hf_token(), diarize_required=False, num_speakers=m.get("speakers_hint") or None,
         on_info=on_info, on_segment=on_segment, on_diarize=on_diarize,
-        initial_prompt=vocab.whisper_prompt(glossary, people, projects),
-        hotwords=vocab.hotwords(glossary, people, projects),
+        initial_prompt=vocab.whisper_prompt(glossary, people, projects, with_words=not use_hotwords),
+        hotwords=vocab.hotwords(glossary, people, projects) if use_hotwords else None,
     )
     # Mistakes the team already fixed by hand on earlier meetings are fixed again here
-    data["learned_fixes"] = learning.apply_to_data(data)
+    data["learned_fixes"] = learning.apply_to_data(data, m.get("created_by"))
     # Known voices get their names; the voice fingerprints never stay in the transcript
     try:
         known = voices.identify(meeting_id, data)
@@ -186,12 +238,13 @@ def _extract(meeting_id, data=None):
     glossary = vocab.load_glossary()
 
     # 1) Fix misheard words (once per meeting; "Analyze again" doesn't redo it)
+    t_fix = time.time()
     if data.get("corrected") is None and os.environ.get("TRANSCRIPT_CORRECTION", "1") != "0":
         db.update_meeting(meeting_id, status="extracting", progress=1, error=None,
                           note=f"{llm.label()} is fixing misheard words…")
         try:
             corrector.apply_corrections(
-                data, glossary, [p["full_name"] for p in people], learned=learning.examples(),
+                data, glossary, [p["full_name"] for p in people], learned=learning.examples(m.get("created_by")),
                 on_progress=lambda d, t: db.update_meeting(meeting_id, note=f"{llm.label()} is correcting the transcript ({d}/{t} lines)…"))
             db.save_transcript(meeting_id, data)  # also re-indexes search with the corrected text
         except Exception:
@@ -208,6 +261,7 @@ def _extract(meeting_id, data=None):
         return
 
     # 2) Summary, decisions, tasks
+    t_tasks = time.time()
     db.update_meeting(meeting_id, status="extracting", progress=1, note=f"{llm.label()} is extracting decisions and tasks…",
                       error=None)
     memory.undo(meeting_id)  # "Analyze again": earlier tasks this meeting closed are open again
@@ -221,25 +275,27 @@ def _extract(meeting_id, data=None):
     notes = notes.model_dump()
     for t in notes["tasks"]:
         t.pop("commitment", None)  # only there to make the AI justify each task
+    # Work nobody took on is an ordinary task without an assignee; the PM chooses one in Tasks
+    notes["tasks"] += owners.as_tasks(notes.pop("unowned", None), notes["tasks"])
     updates, reopened = _link_to_memory(notes, mem["items"], memory.closed_tickets(m))
     db.save_notes(meeting_id, notes)
     closed = memory.save(meeting_id, updates, mem["items"])
     memory.save_reopened(meeting_id, reopened)
     org.link_assignees(meeting_id, people)
-    # Work nobody took on goes to "Needs an owner"; work taken on here closes earlier such issues
-    owners.save(meeting_id, notes.get("unowned"))
-    owners.resolve_from_meeting(meeting_id)
-    no_owner = owners.count({meeting_id})
+    no_owner = len(owners.unassigned({meeting_id}))
+    # Where the time went (in the server terminal), to see which step is slow
+    asr, total = data.get("asr_sec"), data.get("processing_sec")
+    print(f"Meeting {meeting_id} ({data.get('duration_sec')} s of audio): "
+          + (f"transcription {asr:.0f} s, speakers {total - asr:.0f} s, " if asr is not None and total is not None else "")
+          + f"word fixes {t_tasks - t_fix:.0f} s, tasks {time.time() - t_tasks:.0f} s ({llm.label()})")
 
     note = None
     if data.get("diarization_error"):
         note = "No speakers: " + data["diarization_error"]
     elif no_owner:
-        note = f"{no_owner} item{'s' if no_owner > 1 else ''} without an owner: give {'them' if no_owner > 1 else 'it'} to someone."
+        note = f"Reminder: {no_owner} task{'s' if no_owner > 1 else ''} without an assignee yet. Choose who does {'them' if no_owner > 1 else 'it'} in Tasks."
     elif closed:
         note = f"{closed} earlier task{'s' if closed > 1 else ''} marked done from this meeting."
+    # No email when a meeting is done: the PM sees it in the app (the PM chose this on 2026-11-16).
+    # notify.meeting_processed(meeting_id) still exists if it is ever wanted again.
     db.update_meeting(meeting_id, status="done", progress=1, note=note)
-    try:
-        notify.meeting_processed(meeting_id)  # email the project's PM
-    except Exception:
-        traceback.print_exc()
