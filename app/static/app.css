@@ -297,7 +297,12 @@ button.quote:hover { color: var(--text); background: var(--surface-3); }
 .rec-btn { width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--line-2); background: var(--surface);
   display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .rec-btn span { width: 24px; height: 24px; border-radius: 50%; background: #D92D20; transition: all 0.2s; }
-.rec-btn.on { border-color: #D92D20; }
+.rec-btn { cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; }
+.rec-btn:focus, .rec-btn:focus-visible { outline: none; }
+.rec-btn:not(.on):hover { border-color: #D92D20; }
+.rec-btn.on { border-color: #D92D20; animation: rec-pulse 1.6s ease-out infinite; }
+@keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 rgba(217, 45, 32, 0.35); } 100% { box-shadow: 0 0 0 12px rgba(217, 45, 32, 0); } }
+@media (prefers-reduced-motion: reduce) { .rec-btn.on { animation: none; box-shadow: 0 0 0 4px rgba(217, 45, 32, 0.2); } }
 .rec-btn.on span { border-radius: 6px; width: 22px; height: 22px; }
 .rec-info { display: flex; flex-direction: column; gap: 2px; }
 .rec-info strong { font-family: var(--mono); font-size: 24px; font-weight: 500; color: var(--heading); }
@@ -841,3 +846,17 @@ details.sources ul { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4p
 @keyframes mic-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.45); } 50% { box-shadow: 0 0 0 8px rgba(180, 35, 24, 0); } }
 @keyframes mic-busy { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .ask-box .ask-mic.rec, .ask-box .ask-mic.busy { animation: none; } }
+
+/* Ticket description in the sections of the Jira form */
+.desc-fields { gap: 10px; padding: 12px; border: 1px solid var(--line-2); border-radius: 12px; }
+.desc-section { display: flex; flex-direction: column; gap: 4px; }
+.desc-section strong { font-size: 13px; color: var(--heading); }
+.desc-fields .desc-section textarea { min-height: 52px; }
+.desc-view { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.desc-view h4 { margin: 8px 0 2px; font-size: 13px; color: var(--heading); }
+.desc-view h4:first-child { margin-top: 0; }
+.desc-view p, .desc-view ul { margin: 0; color: var(--muted, inherit); }
+.desc-view ul { padding-left: 20px; }
+
+/* A standup line the AI inferred from Jira / earlier standups, not clearly heard */
+.su-guess { font-style: italic; color: var(--muted); }

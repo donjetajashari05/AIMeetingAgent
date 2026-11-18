@@ -31,6 +31,12 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 AUDIO_EXT = {".mp3", ".wav", ".m4a", ".webm", ".ogg", ".mp4", ".flac", ".aac"}
 MAX_UPLOAD = 1024 * 1024 * 1024  # 1 GB
 MODELS = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
+
+
+def models():
+    """The Whisper models, plus our fine-tuned ones once their files are in models/."""
+    import transcribe as transcriber  # scripts/transcribe.py
+    return MODELS + transcriber.local_models()
 BUSY = ("queued", "transcribing", "diarizing", "extracting")
 
 
@@ -178,12 +184,13 @@ def status(user=User):
         "speakers": pipeline.has_hf_token(),
         "email": mailer.configured(),
         "jira": jira.configured(),
+        "jira_browse": jira.browse_url(),  # issue keys in standup reports link here
         "jira_mock": jira.mock(),
         "jira_default": jira._default_key() or None,  # used when a ticket/project has no Jira key
         "calendar": gcal.configured(),         # Google Calendar can be connected (read only)
         "jira_url": os.environ.get("JIRA_BASE_URL", "").rstrip("/") if jira.configured() and not jira.mock() else None,
         "gpu": gpu,
-        "models": MODELS,
+        "models": models(),
         # large-v3-turbo: measured on a real meeting here, ~3x faster than large-v3 on the CPU and just as accurate
         "default_model": os.environ.get("WHISPER_MODEL") or "large-v3-turbo",
         "today": date.today().isoformat(),
@@ -223,7 +230,7 @@ async def create_meeting(
     ext = Path(file.filename or "").suffix.lower()
     if ext not in AUDIO_EXT | {".json"}:
         raise HTTPException(400, "Unknown format. Use mp3, wav, m4a, webm, ogg, mp4, flac or json.")
-    if model not in MODELS:
+    if model not in models():
         raise HTTPException(400, "Model i panjohur.")
     try:
         mdate = date.fromisoformat(meeting_date) if meeting_date else date.today()
@@ -560,6 +567,8 @@ def update_task(task_id: int, body: TaskUpdate, user=User):
             org.set_task_assignee(task_id, body.assignee_id)
         except org.OrgError as e:
             raise HTTPException(404, str(e))
+    if (body.set_assignee and body.assignee_id) or (body.set_email and body.assignee_email):
+        ticketing.auto_for_task(task_id)  # the task has a person now: its ticket is made (only if it has none)
     return db.get_task(task_id)
 
 

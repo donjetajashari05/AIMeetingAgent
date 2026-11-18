@@ -10,3 +10,9 @@ data/uploads/
 data/*.jsonl
 data/*.log
 models/
+
+# Speech datasets (people's voices): never in git
+data/asr_test/
+
+# Fine-tuned speech models (large files)
+models/

@@ -13,7 +13,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from . import db, dedupe, learning, memory, org, owners, standup, voices
+from . import db, dedupe, learning, memory, org, owners, standup, tickets, voices
 
 sys.path.insert(0, str(db.ROOT / "scripts"))
 
@@ -282,6 +282,13 @@ def _extract(meeting_id, data=None):
     closed = memory.save(meeting_id, updates, mem["items"])
     memory.save_reopened(meeting_id, reopened)
     org.link_assignees(meeting_id, people)
+    # Tasks with a person become draft tickets right away ("Tickets to send"); nothing is sent to Jira
+    made = 0
+    try:
+        db.update_meeting(meeting_id, note=f"{llm.label()} is writing the tickets…")
+        made = tickets.auto_for_meeting(meeting_id)
+    except Exception:
+        traceback.print_exc()  # the tasks are saved; the PM can still make tickets by hand
     no_owner = len(owners.unassigned({meeting_id}))
     # Where the time went (in the server terminal), to see which step is slow
     asr, total = data.get("asr_sec"), data.get("processing_sec")
@@ -293,7 +300,10 @@ def _extract(meeting_id, data=None):
     if data.get("diarization_error"):
         note = "No speakers: " + data["diarization_error"]
     elif no_owner:
-        note = f"Reminder: {no_owner} task{'s' if no_owner > 1 else ''} without an assignee yet. Choose who does {'them' if no_owner > 1 else 'it'} in Tasks."
+        note = (f"{made} ticket{'s' if made != 1 else ''} ready to send. " if made else "") + \
+            f"Reminder: {no_owner} task{'s' if no_owner > 1 else ''} without an assignee yet. Choose who does {'them' if no_owner > 1 else 'it'} in Tasks: the ticket is made then."
+    elif made:
+        note = f"{made} ticket{'s' if made != 1 else ''} ready to send in Tickets."
     elif closed:
         note = f"{closed} earlier task{'s' if closed > 1 else ''} marked done from this meeting."
     # No email when a meeting is done: the PM sees it in the app (the PM chose this on 2026-11-16).

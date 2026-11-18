@@ -935,7 +935,7 @@ async function renderTasks(host, recount) {
   paint();
   const meetingTitle = meetingFilter && (all.find((t) => t.meeting_id === meetingFilter) || {}).meeting_title;
   host.replaceChildren(...nn(
-    el('p', { class: 'muted', text: 'Tick the tasks that belong together and click “Make ticket”: the AI writes one Jira ticket from them, and it moves to “Tickets to send”. ✓ on the right marks a task as done; tickets moved to Done in Jira are marked done here automatically.' }),
+    el('p', { class: 'muted', text: 'Tasks that have a person become tickets automatically (“Tickets to send”). For a task without a person, choose who does it and its ticket is made. You can still tick tasks and click “Make ticket” yourself. ✓ marks a task as done; tickets moved to Done in Jira are marked done here automatically.' }),
     el('div', { class: 'card-head work-filters' },
       meetingTitle ? el('button', { type: 'button', class: 'chip active', title: 'Clear filter',
         onclick: () => { location.hash = '#/tasks'; } }, `Only: ${meetingTitle}`, icon('x', 14, 2.2)) : el('span'),
@@ -2028,7 +2028,7 @@ function taskPicker(reload) {
       refreshOpenCount();
       openForm('Ticket created', nn(
         el('h3', { class: 'ticket-title', text: r.ticket.description }),
-        r.ticket.details ? el('p', { class: 'small muted', style: { whiteSpace: 'pre-line' }, text: r.ticket.details }) : null,
+        descView(r.ticket.details),
         r.ai ? null : el('p', { class: 'small subtle', text: 'Written from the task text (no AI key).' }),
         el('p', { class: 'small subtle', text: 'Next: in “Tickets to send” choose who gets it and send it to Jira.' }),
       ), { saveText: 'Go to Tickets to send', onSave: async () => { location.hash = '#/tasks?tab=send'; } });
@@ -2055,6 +2055,69 @@ function taskPicker(reload) {
   return { pick, footer, paintFooter };
 }
 
+/* The ticket description has the sections of the team's Jira form (same as app/tickets.py). */
+const DESC_SECTIONS = ['Summary', 'Context', 'Acceptance criteria', 'Other information'];
+const DESC_HINTS = {
+  Summary: 'What has to be done, in 1–2 sentences.',
+  Context: 'Why it is needed, the background.',
+  'Acceptance criteria': 'One per line: when is it done?',
+  'Other information': 'Links, dependencies, who to ask.',
+};
+
+function parseDesc(text) {
+  const out = Object.fromEntries(DESC_SECTIONS.map((h) => [h, '']));
+  const lines = (text || '').trim().split('\n');
+  if (!lines.some((l) => DESC_SECTIONS.includes(l.trim()))) {  // older tickets: free text
+    const [head, done = ''] = (text || '').split('Done when:');
+    out.Summary = head.trim();
+    out['Acceptance criteria'] = done.trim();
+    return out;
+  }
+  let cur = null;
+  lines.forEach((l) => { if (DESC_SECTIONS.includes(l.trim())) cur = l.trim(); else if (cur) out[cur] += `${l}\n`; });
+  DESC_SECTIONS.forEach((h) => { out[h] = out[h].trim() === 'N/A' ? '' : out[h].trim(); });
+  return out;
+}
+
+const descCriteria = (text) => (text || '').split('\n').map((c) => c.replace(/^\s*[-•]\s*/, '').trim()).filter(Boolean);
+
+function composeDesc(parts) {
+  return DESC_SECTIONS.map((h) => {
+    const body = h === 'Acceptance criteria'
+      ? descCriteria(parts[h]).filter((c) => c !== 'N/A').map((c) => `- ${c}`).join('\n')
+      : (parts[h] || '').trim();
+    return `${h}\n${body || 'N/A'}`;
+  }).join('\n\n');
+}
+
+/** The four description boxes, like the Jira form. value() gives the text to save. */
+function descFields(details) {
+  const parts = parseDesc(details);
+  const boxes = Object.fromEntries(DESC_SECTIONS.map((h) => {
+    const box = el('textarea', { rows: h === 'Acceptance criteria' ? 4 : 2, maxlength: '1500', placeholder: DESC_HINTS[h],
+      style: { fontFamily: 'var(--font)' } });
+    box.value = h === 'Acceptance criteria' ? descCriteria(parts[h]).map((c) => `- ${c}`).join('\n') : parts[h];
+    return [h, box];
+  }));
+  const node = el('div', { class: 'field field-wide desc-fields' },
+    el('span', { text: 'Description' }),
+    DESC_SECTIONS.map((h) => el('label', { class: 'desc-section' }, el('strong', { text: h }), boxes[h])));
+  const empty = () => DESC_SECTIONS.every((h) => !boxes[h].value.trim());
+  return { node, empty, value: () => composeDesc(Object.fromEntries(DESC_SECTIONS.map((h) => [h, boxes[h].value]))) };
+}
+
+/** The description shown like in Jira: a heading per section. */
+function descView(details) {
+  if (!details) return null;
+  const parts = parseDesc(details);
+  return el('div', { class: 'desc-view' }, DESC_SECTIONS.map((h) => {
+    const crit = h === 'Acceptance criteria' ? descCriteria(parts[h]) : null;
+    return [el('h4', { text: h }),
+      crit && crit.length ? el('ul', {}, crit.map((c) => el('li', { text: c })))
+        : el('p', { class: parts[h] ? '' : 'subtle', style: { whiteSpace: 'pre-line' }, text: parts[h] || 'N/A' })];
+  }));
+}
+
 /** Edit a task, or the ticket it is part of: title, details, due date, Jira project and the quotes.
  *  quoteTasks: the tasks whose Albanian quotes are shown (they can be fixed and are learned). */
 async function ticketEditForm(targetId, quoteTasks, reload) {
@@ -2065,6 +2128,7 @@ async function ticketEditForm(targetId, quoteTasks, reload) {
   const details = el('textarea', { style: { fontFamily: 'var(--font)', minHeight: '110px' }, rows: Math.min(12, Math.max(3, (t.details || '').split('\n').length + 1)),
     placeholder: 'Details for the person who gets it (optional)' });
   details.value = t.details || '';
+  const desc = isTicket ? descFields(t.details) : null;  // a ticket: the Jira form's sections
   const due = el('input', { type: 'date', value: t.due_date || '' });
   const jiraKey = el('input', { type: 'text', value: t.jira_project || '', maxlength: '10', placeholder: t.ticket_project || state.status.jira_default || 'e.g. PAY',
     style: { textTransform: 'uppercase' } });
@@ -2075,7 +2139,7 @@ async function ticketEditForm(targetId, quoteTasks, reload) {
     el('div', { class: 'field-grid' },
       field('Project key', jiraKey, { hint: t.ticket_project && !t.jira_project ? `Empty = ${t.ticket_project} (from the project)` : 'Empty = the meeting’s project' }),
       field('Summary', title),
-      field('Description', details),
+      desc ? desc.node : field('Description', details),
       field('Priority', prio, { wide: false, hint: t.priority_reason ? `AI: ${t.priority_reason}` : null }),
       field('Due date', due, { wide: false, hint: t.due_date_text ? `Said in the meeting: “${t.due_date_text}”` : null }),
       field('Original estimate', est, { wide: false, hint: 'Jira format: 1w = 5d, 1d = 8h' })),
@@ -2087,7 +2151,7 @@ async function ticketEditForm(targetId, quoteTasks, reload) {
     saveText: 'Save',
     onSave: async () => {
       await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: JSON.stringify({
-        description: title.value, details: details.value, jira_project: jiraKey.value, due_date: due.value || null, set_due_date: true,
+        description: title.value, details: desc ? desc.value() : details.value, jira_project: jiraKey.value, due_date: due.value || null, set_due_date: true,
         ...planBody(prio, est) }) });
       toast(isTicket ? 'Ticket saved.' : 'Task saved.');
       await reload();
@@ -2150,7 +2214,7 @@ function newTicketForm(onCreated) {
   const projects = isAdmin() ? state.org.projects : state.org.projects.filter((p) => state.me.pm_project_ids.includes(p.id));
   const people = state.org.employees.filter((e) => e.email && e.active);
   const title = el('input', { type: 'text', required: true, maxlength: '250', placeholder: 'e.g. Fix the login page on mobile' });
-  const details = el('textarea', { rows: '5', maxlength: '4000', placeholder: 'What has to be done, and when is it finished?\n\nScope: …\nDone when: …' });
+  const desc = descFields('');
   const person = el('select', {},
     el('option', { value: '', text: '— Choose later —' }),
     people.map((e) => el('option', { value: String(e.id), text: `${e.full_name} — ${e.email}` })),
@@ -2178,7 +2242,7 @@ function newTicketForm(onCreated) {
     field('Project', project, { wide: false }),
     field('Project key', jiraKey, { wide: false, hint: 'Empty = the project’s Jira key, or the default.' }),
     field('Summary', title),
-    field('Description', details, { hint: 'Optional. Written as it will appear in Jira.' }),
+    desc.node,
     el('label', { class: 'field field-wide' }, 'Assignee', person, other),
     field('Priority', prio, { wide: false }),
     field('Due date', due, { wide: false }),
@@ -2187,7 +2251,7 @@ function newTicketForm(onCreated) {
     saveText: 'Create ticket',
     onSave: async () => {
       const body = {
-        title: title.value, details: details.value || null, due_date: due.value || null,
+        title: title.value, details: desc.empty() ? null : desc.value(), due_date: due.value || null,
         project_id: project.value ? Number(project.value) : null, jira_project: jiraKey.value || null,
         assignee_id: person.value && person.value !== '__other' ? Number(person.value) : null,
         assignee_email: person.value === '__other' ? other.value : null,
@@ -2275,7 +2339,7 @@ async function renderTickets(host, tab, recount) {
       el('ul', {}, t.sources.map((x) => el('li', {}, el('span', { text: x.description }), x.quote ? editableQuote(x.id, x.quote, reload) : null)))) : null;
     const body = nn(
       el('h3', { class: 'ticket-title', text: t.description }),
-      t.details ? el('p', { class: 'small muted', style: { whiteSpace: 'pre-line' }, text: t.details }) : null,
+      descView(t.details),
       t.quote ? (stage === 'sent' ? el('p', { class: 'quote', text: `“${t.quote}”` }) : editableQuote(t.id, t.quote, reload)) : null,
       sources,
       t.priority || t.estimate_hours ? el('div', { class: 'meta' }, planPills(t, { estimate: true }),
@@ -2339,13 +2403,14 @@ async function renderTickets(host, tab, recount) {
 
   function paintFooter() {
     const ready = visible().filter((t) => t.recipient_email);
-    const chosen = ready.filter((t) => selected.has(t.id));
-    footer.hidden = tab !== 'send' || ready.length < 2;
+    const picked = ready.filter((t) => selected.has(t.id));
+    const chosen = picked.length ? picked : ready;  // nothing ticked = every ticket that has a person
+    footer.hidden = tab !== 'send' || !ready.length;
     if (footer.hidden) return;
     footer.replaceChildren(
       el('label', { class: 'check-inline' },
         el('input', {
-          type: 'checkbox', checked: chosen.length === ready.length, 'aria-label': 'Select all with a person',
+          type: 'checkbox', checked: picked.length === ready.length, 'aria-label': 'Select all with a person',
           onchange: (e) => { ready.forEach((t) => (e.target.checked ? selected.add(t.id) : selected.delete(t.id))); paint(); },
         }), 'Select all'),
       el('span', { class: 'spacer' }),
@@ -2356,7 +2421,7 @@ async function renderTickets(host, tab, recount) {
           e.currentTarget.disabled = true;
           try { await send(chosen); } catch (err) { toast(err.message); e.currentTarget.disabled = false; }
         },
-      }, icon('jira', 16, 2), `Send selected (${chosen.length})`));
+      }, icon('jira', 16, 2), picked.length ? `Send selected (${chosen.length})` : `Send all ready (${chosen.length})`));
   }
 
   function paint() {
@@ -2375,7 +2440,7 @@ async function renderTickets(host, tab, recount) {
   paint();
   host.replaceChildren(...nn(
     el('p', { class: 'muted', text: tab === 'send'
-      ? 'Choose who gets each ticket and send it. Nothing goes to Jira unless you send it.'
+      ? 'Tickets are written automatically from each meeting’s tasks. Check them and click “Send all ready”. Nothing goes to Jira unless you send it.'
       : 'Tickets already in Jira. Their status is read back from Jira.' }),
     meeting ? el('div', { class: 'chips' }, el('button', { type: 'button', class: 'chip active', title: 'Clear filter',
       onclick: () => { location.hash = `#/tasks?tab=${tab}`; } }, `Only: ${meeting.meeting_title}`, icon('x', 14, 2.2))) : null,
@@ -2466,11 +2531,12 @@ function speakerForm(m, s, after = () => renderMeeting(m.id)) {
 
 /* ================= Daily standups (a report, never tasks or tickets) ================= */
 
-const STANDUP_STATUS = { on_track: ['On track', 'is-done'], at_risk: ['At risk', 'is-progress'], blocked: ['Blocked', 'is-blocked'] };
-
-function standupStatus(status, reason) {
-  const [label, cls] = STANDUP_STATUS[status] || STANDUP_STATUS.on_track;
-  return el('span', { class: `stage ${cls}`, text: label, title: reason || null });
+/** The standup shows what people said, without judging it: only a note when the audio was unclear. */
+function clarityTag(u) {
+  if (!u.unclear) return null;
+  const some = u.done.length || u.today.length || u.blockers.length;
+  return el('span', { class: 'stage', text: some ? 'Partly unclear' : 'Not clear',
+    title: some ? 'Only the parts that could be understood are listed' : 'The recording of this part could not be understood' });
 }
 
 function standupButtons() {
@@ -2480,16 +2546,27 @@ function standupButtons() {
   ];
 }
 
-/** One person's update: done / today / blockers / carried over. */
+/** One line of an update: Jira keys (KAN-12) become links, and a line the AI inferred from
+ *  context ("… (probably)") is shown as a guess. */
+function suLine(text) {
+  const guess = /\s*\(probably\)\s*$/i.test(text);
+  const clean = text.replace(/\s*\(probably\)\s*$/i, '');
+  const base = state.status.jira_browse;
+  const parts = clean.split(/\b([A-Z][A-Z0-9]+-\d+)\b/).map((p, i) => (i % 2 && base
+    ? el('a', { href: base + p, target: '_blank', rel: 'noopener', class: 'jira-badge', text: p }) : p));
+  return el('li', { class: guess ? 'su-guess' : null, title: guess ? 'Not clearly heard: inferred from their Jira work and earlier standups' : null },
+    ...parts, guess ? el('span', { class: 'small subtle', text: ' · probably' }) : null);
+}
+
+/** One person's update: done / today / problems they mentioned. */
 function standupLists(u) {
   const list = (title, items, iconName, cls) => (items.length ? el('div', { class: `su-list ${cls}` },
     el('span', { class: 'su-label' }, icon(iconName, 14, 2.2), title),
-    el('ul', {}, items.map((x) => el('li', { text: x })))) : null);
+    el('ul', {}, items.map(suLine))) : null);
   return nn(
     list('Done', u.done, 'tick', 'su-done'),
     list('Today', u.today, 'arrow', 'su-today'),
-    list('Blocked by', u.blockers, 'alert', 'su-block'),
-    list('Carried over from the last standup', u.carried_over, 'retry', 'su-carry'));
+    list('Problems mentioned', u.blockers, 'alert', 'su-block'));
 }
 
 async function renderStandups() {
@@ -2500,22 +2577,16 @@ async function renderStandups() {
 
   const personCard = (p) => {
     const latest = p.entries[0];
-    const days = p.entries.slice(0, 10).reverse();
     return el('article', { class: 'card su-person' },
       el('div', { class: 'su-head' },
         el('h3', { class: 'grow', text: p.name }),
-        standupStatus(p.status, latest.status_reason)),
-      el('div', { class: 'su-dots', 'aria-label': 'Last standups, oldest to newest' },
-        days.map((e) => el('a', { href: `#/standup/${e.meeting_id}`, class: `su-dot ${(STANDUP_STATUS[e.status] || [])[1] || ''}`,
-          title: `${e.meeting_date}: ${(STANDUP_STATUS[e.status] || ['?'])[0]}${e.status_reason ? ` — ${e.status_reason}` : ''}` })),
-        el('span', { class: 'small subtle', text: `last ${days.length} standup${days.length === 1 ? '' : 's'}` })),
-      p.carried_streak >= 2 ? notice('warn', 'retry', `The same work was carried over ${p.carried_streak} standups in a row.`) : null,
-      el('p', { class: 'small subtle', text: `Latest: ${fmtShort(latest.meeting_date)}${latest.status_reason ? ` · ${latest.status_reason}` : ''}` }),
+        clarityTag(latest)),
+      el('p', { class: 'small subtle' }, 'Latest: ', el('a', { href: `#/standup/${latest.meeting_id}`, text: fmtShort(latest.meeting_date) })),
       ...standupLists(latest),
       p.entries.length > 1 ? el('details', { class: 'sources' },
         el('summary', { text: `Earlier standups (${p.entries.length - 1})` }),
         el('div', { class: 'stack', style: { gap: '10px', marginTop: '8px' } }, p.entries.slice(1).map((e) => el('div', { class: 'su-past' },
-          el('div', { class: 'su-head' }, el('a', { href: `#/standup/${e.meeting_id}`, text: fmtShort(e.meeting_date) }), standupStatus(e.status, e.status_reason)),
+          el('div', { class: 'su-head' }, el('a', { href: `#/standup/${e.meeting_id}`, text: fmtShort(e.meeting_date) }), clarityTag(e)),
           ...standupLists(e))))) : null);
   };
 
@@ -2527,9 +2598,7 @@ async function renderStandups() {
         el('b', { text: s.title }),
         el('div', { class: 'small subtle', text: [fmtShort(s.meeting_date), s.project_name || s.team_name,
           s.status === 'done' ? `${s.people} ${s.people === 1 ? 'person' : 'people'}` : null].filter(Boolean).join(' · ') })),
-      busy ? el('span', { class: 'pill soon', text: 'Processing…' }) : s.status === 'error' ? el('span', { class: 'pill late', text: 'Error' }) : null,
-      s.blocked ? el('span', { class: 'stage is-blocked', text: `${s.blocked} blocked` }) : null,
-      s.at_risk ? el('span', { class: 'stage is-progress', text: `${s.at_risk} at risk` }) : null);
+      busy ? el('span', { class: 'pill soon', text: 'Processing…' }) : s.status === 'error' ? el('span', { class: 'pill late', text: 'Error' }) : null);
   };
 
   const paint = () => {
@@ -2540,7 +2609,7 @@ async function renderStandups() {
       slot.replaceChildren(people.length
         ? el('div', { class: 'su-grid' }, people.map(personCard))
         : el('section', { class: 'card' }, el('div', { class: 'empty' }, el('strong', { text: 'No standups in the last 2 weeks' }),
-          'Record or upload a daily standup: each person’s update shows here, with how their work is going.')));
+          'Record or upload a daily standup: a summary of what each person said shows here.')));
     } else {
       slot.replaceChildren(el('section', { class: 'card', style: { gap: '4px' } }, list.length ? list.map(dayRow)
         : el('div', { class: 'empty' }, el('strong', { text: 'No standups yet' }), 'Record the first one with “Record standup”.')));
@@ -2549,7 +2618,7 @@ async function renderStandups() {
   paint();
   view.replaceChildren(el('div', { class: 'page' },
     pageHead('A report, not tickets', 'Daily standups', ...standupButtons()),
-    el('p', { class: 'muted', text: 'What everyone is working on and how their work is going. Nothing said in a standup becomes a task or a ticket. People with a problem are shown first.' }),
+    el('p', { class: 'muted', text: 'A summary of what each person said: what they finished, what they work on and any problems they mentioned. Nothing said in a standup becomes a task or a ticket.' }),
     tabsBar, slot));
   if (list.some(isBusy)) {
     poll(async () => { const l = await api('/api/standups'); if (!l.some(isBusy)) { stopPolling(); route(); } });
@@ -2559,7 +2628,6 @@ async function renderStandups() {
 async function renderStandup(id) {
   const s = await api(`/api/standups/${id}`);
   const busy = isBusy(s);
-  const counts = Object.fromEntries(Object.keys(STANDUP_STATUS).map((k) => [k, s.updates.filter((u) => u.status === k).length]));
   const retry = s.can_manage && s.status === 'error' ? el('button', { type: 'button', class: 'btn btn-sm', onclick: async () => {
     try { await api(`/api/meetings/${id}/retry`, { method: 'POST' }); route(); } catch (e) { toast(e.message); }
   } }, icon('retry', 14, 2), 'Try again') : null;
@@ -2598,13 +2666,10 @@ async function renderStandup(id) {
       `About ${Math.round(s.unclear_share * 100)}% of this recording could not be understood, so the report is incomplete. `
       + 'Usually the people were too far from the microphone or spoke at the same time. Next time put the laptop in the middle of the table or use an external microphone, and let one person speak at a time.') : null,
     s.summary ? el('section', { class: 'card' },
-      el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Summary' }),
-        el('div', { class: 'actions' }, Object.entries(counts).filter(([, n]) => n).map(([k, n]) => el('span', { class: `stage ${STANDUP_STATUS[k][1]}`, text: `${n} ${STANDUP_STATUS[k][0].toLowerCase()}` })))),
+      el('div', { class: 'card-head' }, el('span', { class: 'eyebrow', text: 'Summary' })),
       el('p', { class: 'summary', text: s.summary })) : null,
     s.updates.length ? el('div', { class: 'su-grid' }, s.updates.map((u) => el('article', { class: 'card su-person' },
-      el('div', { class: 'su-head' }, el('h3', { class: 'grow', text: u.name }),
-        u.unclear ? el('span', { class: 'stage', text: 'Not clear' }) : standupStatus(u.status, u.status_reason)),
-      u.status_reason ? el('p', { class: 'small subtle', text: u.status_reason }) : null,
+      el('div', { class: 'su-head' }, el('h3', { class: 'grow', text: u.name }), clarityTag(u)),
       nameButton(u.person),
       ...standupLists(u),
       u.quote ? el('p', { class: 'quote', text: `“${u.quote}”` }) : null)))

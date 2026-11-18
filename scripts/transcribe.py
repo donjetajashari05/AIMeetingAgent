@@ -27,6 +27,15 @@ SPEAKER_LABEL = "Folësi"
 UNCLEAR_LOGPROB = -1.0  # Whisper's own threshold for "not sure, try again"
 UNCLEAR_REPEAT = 2.4    # text this repetitive ("dhe dhe dhe…") is a loop, not speech
 
+# Our own fine-tuned models (scripts/train_whisper_sq.ipynb), unzipped into models/ (never in git).
+# A name here can be chosen like any Whisper model once its folder has model.bin.
+LOCAL_MODELS = {"albanian-tuned": Path(__file__).resolve().parent.parent / "models" / "whisper-turbo-sq-ct2"}
+
+
+def local_models():
+    """The local model names whose files are in place."""
+    return [n for n, p in LOCAL_MODELS.items() if (p / "model.bin").exists()]
+
 
 def get_device():
     """Use the GPU if available, otherwise fall back to the CPU."""
@@ -43,7 +52,8 @@ def load_model(name):
     # the fast cores wait for the slow ones. Measured on an i7-1355U: 4 threads ~2x faster than 10.
     # WHISPER_THREADS in .env overrides it (e.g. a desktop CPU with many fast cores).
     threads = int(os.environ.get("WHISPER_THREADS") or min(4, os.cpu_count() or 4)) if device == "cpu" else 0
-    return WhisperModel(name, device=device, compute_type=compute_type, cpu_threads=threads)
+    path = str(LOCAL_MODELS[name]) if name in LOCAL_MODELS else name
+    return WhisperModel(path, device=device, compute_type=compute_type, cpu_threads=threads)
 
 
 def transcribe_audio(audio, model_name="large-v3-turbo", language=None, diarize=False,

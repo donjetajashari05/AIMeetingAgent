@@ -99,6 +99,30 @@ def _adf(paragraphs):
         {"type": "paragraph", "content": [{"type": "text", "text": p}]} for p in paragraphs if p]}
 
 
+def _ticket_adf(details, extra=()):
+    """The description in the sections of the team's Jira form (Summary, Context, Acceptance criteria,
+    Other information), each a heading like in Jira. `extra`: lines added under Other information
+    (where the ticket came from)."""
+    from . import tickets  # local import: tickets imports db and the AI helpers
+    parts = tickets.parse(details)
+    extra = [x for x in extra if x]
+    content = []
+    for h in tickets.SECTIONS:
+        content.append({"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": h}]})
+        text = parts[h]
+        if h == "Acceptance criteria" and tickets.criteria_list(text):
+            content.append({"type": "bulletList", "content": [
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": c}]}]}
+                for c in tickets.criteria_list(text)]})
+            continue
+        lines = [line for line in text.split("\n\n") if line.strip()]
+        if h == "Other information":
+            lines += extra
+        for p in lines or [tickets.NA]:
+            content.append({"type": "paragraph", "content": [{"type": "text", "text": p.strip()}]})
+    return {"type": "doc", "version": 1, "content": content}
+
+
 def estimate_text(hours):
     """4 -> '4h', 1.5 -> '1h 30m', 12 -> '1d 4h' (Jira's format, 1 day = 8 h)."""
     if not hours:
@@ -149,6 +173,46 @@ def _default_key():
     return (os.environ.get("JIRA_DEFAULT_PROJECT") or "").strip().upper() or ("TEST" if mock() else "")
 
 
+def browse_url():
+    """Base for issue links (https://x.atlassian.net/browse/), or None."""
+    return f"{_base()}/browse/" if configured() and not mock() else None
+
+
+_work_cache, _work_lock = {}, threading.Lock()
+WORK_TTL = 300  # seconds: a standup report asks once, "Write the report again" reuses it
+
+
+def work_items(email, limit=15):
+    """The person's current Jira issues: not done, or resolved in the last 3 days, newest first.
+    [{"key", "summary", "status"}]; [] when Jira is not set up, the person has no Jira account,
+    or Jira cannot be reached (a standup report must never fail because of Jira).
+    Only key, summary and status are read: no descriptions or comments."""
+    if not email or not configured() or mock():
+        return []
+    now = time.time()
+    with _work_lock:
+        hit = _work_cache.get(email.lower())
+        if hit and hit[0] > now:
+            return hit[1]
+    try:
+        account = find_account_id(email, {})
+        items = []
+        if account:
+            jql = (f'assignee = "{account}" AND (statusCategory != Done OR resolved >= -3d) '
+                   "ORDER BY updated DESC")
+            r = _request("POST", "/rest/api/3/search/jql",
+                         {"jql": jql, "fields": ["summary", "status"], "maxResults": limit}) or {}
+            items = [{"key": i["key"], "summary": (i["fields"].get("summary") or "")[:200],
+                      "status": ((i["fields"].get("status") or {}).get("name") or "")}
+                     for i in r.get("issues") or []]
+    except JiraError as e:
+        print(f"Jira work items for a standup: {e}")
+        items = []
+    with _work_lock:
+        _work_cache[email.lower()] = (now + WORK_TTL, items)
+    return items
+
+
 def push_tasks(task_ids, sender_id=None):
     """Send the chosen tickets (page "Tickets") to Jira.
 
@@ -186,8 +250,7 @@ def push_tasks(task_ids, sender_id=None):
             "project": {"key": project_key},
             "issuetype": {"name": issue_type},
             "summary": t["description"][:250],
-            "description": _adf([
-                t["details"],
+            "description": _ticket_adf(t["details"], [
                 _plan_line(t),
                 None if manual else f"From the meeting “{t['meeting_title']}” ({t['meeting_date']}).",
                 f"Quote: “{t['quote']}”" if t["quote"] else None,
